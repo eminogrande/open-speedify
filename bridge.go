@@ -41,6 +41,8 @@ func serveUDPBridge(ctx context.Context, listenAddr, targetAddr, ifaceName strin
 	if err != nil {
 		return err
 	}
+	_ = front.SetReadBuffer(2 << 20)
+	_ = front.SetWriteBuffer(2 << 20)
 	defer front.Close()
 
 	go func() {

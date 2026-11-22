@@ -278,8 +278,8 @@ func runControl(args []string) error {
 func runBench(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("bench", flag.ExitOnError)
 	controlAddr := flags.String("control", "127.0.0.1:19454", "control API address")
-	testURL := flags.String("url", "https://speed.cloudflare.com/__down?bytes=25000000", "download URL for throughput test")
-	streams := flags.Int("streams", 4, "parallel HTTP streams")
+	testURL := flags.String("url", "https://fsn1-speed.hetzner.com/100MB.bin", "download URL for throughput test")
+	streams := flags.Int("streams", 3, "parallel HTTP streams")
 	seconds := flags.Int("seconds", 8, "duration per phase in seconds")
 	flags.Parse(args)
 
@@ -309,7 +309,7 @@ func runBench(ctx context.Context, args []string) error {
 		for _, w := range want {
 			wantSet[w] = true
 		}
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(25 * time.Second)
 		for time.Now().Before(deadline) {
 			cur, err := fetchStatus(*controlAddr)
 			if err == nil {
@@ -352,7 +352,8 @@ func runBench(ctx context.Context, args []string) error {
 			}
 			mbps, bytes, err := measureDownload(ctx, *testURL, *streams, time.Duration(*seconds)*time.Second)
 			if err != nil {
-				return fmt.Errorf("solo %s failed: %w", solo, err)
+				fmt.Printf("SOLO   %-12s    0.00 Mbps  (err: %v)\n", solo, err)
+				continue
 			}
 			results[solo] = mbps
 			sumSolo += mbps
@@ -418,6 +419,7 @@ func measureDownload(parent context.Context, targetURL string, streams int, dur 
 					errMu.Unlock()
 					return
 				}
+				req.Header.Set("User-Agent", "curl/8.7.1")
 				resp, err := client.Do(req)
 				if err != nil {
 					if ctx.Err() == nil {
@@ -427,6 +429,15 @@ func measureDownload(parent context.Context, targetURL string, streams int, dur 
 						}
 						errMu.Unlock()
 					}
+					return
+				}
+				if resp.StatusCode != http.StatusOK {
+					resp.Body.Close()
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("HTTP %d from %s", resp.StatusCode, targetURL)
+					}
+					errMu.Unlock()
 					return
 				}
 				for {

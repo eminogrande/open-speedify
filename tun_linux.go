@@ -140,6 +140,8 @@ func relayRules(name, external string, port int) [][]string {
 		{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "10.77.0.0/16", "-o", external, "-m", "comment", "--comment", "open-speedify", "-j", "MASQUERADE"},
 		{"iptables", "-I", "FORWARD", "1", "-i", name, "-o", external, "-m", "comment", "--comment", "open-speedify", "-j", "ACCEPT"},
 		{"iptables", "-I", "FORWARD", "1", "-i", external, "-o", name, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-m", "comment", "--comment", "open-speedify", "-j", "ACCEPT"},
+		{"iptables", "-t", "mangle", "-I", "FORWARD", "1", "-i", name, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-m", "comment", "--comment", "open-speedify", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
+		{"iptables", "-t", "mangle", "-I", "FORWARD", "1", "-o", name, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-m", "comment", "--comment", "open-speedify", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
 	}
 }
 

@@ -6,33 +6,44 @@ import (
 	"time"
 )
 
-const maxPendingPackets = 1024
+const (
+	maxPendingPackets = 1024
+	maxSkippedTrack   = 2048
+)
 
 type reassemblerStats struct {
-	Delivered   uint64 `json:"delivered"`
-	Reordered   uint64 `json:"reordered"`
-	GapsSkipped uint64 `json:"gaps_skipped"`
-	Duplicates  uint64 `json:"duplicates"`
-	Pending     int    `json:"pending"`
+	Delivered     uint64 `json:"delivered"`
+	Reordered     uint64 `json:"reordered"`
+	LateDelivered uint64 `json:"late_delivered"`
+	GapsSkipped   uint64 `json:"gaps_skipped"`
+	Duplicates    uint64 `json:"duplicates"`
+	Pending       int    `json:"pending"`
 }
 
 type reassembler struct {
-	mu          sync.Mutex
-	next        uint64
-	started     bool
-	closed      bool
-	pending     map[uint64][]byte
-	wait        time.Duration
-	timer       *time.Timer
-	deliver     func([]byte) error
-	delivered   atomic.Uint64
-	reordered   atomic.Uint64
-	gapsSkipped atomic.Uint64
-	duplicates  atomic.Uint64
+	mu            sync.Mutex
+	next          uint64
+	started       bool
+	closed        bool
+	pending       map[uint64][]byte
+	skipped       map[uint64]struct{}
+	wait          time.Duration
+	timer         *time.Timer
+	deliver       func([]byte) error
+	delivered     atomic.Uint64
+	reordered     atomic.Uint64
+	lateDelivered atomic.Uint64
+	gapsSkipped   atomic.Uint64
+	duplicates    atomic.Uint64
 }
 
 func newReassembler(wait time.Duration, deliver func([]byte) error) *reassembler {
-	return &reassembler{pending: make(map[uint64][]byte), wait: wait, deliver: deliver}
+	return &reassembler{
+		pending: make(map[uint64][]byte),
+		skipped: make(map[uint64]struct{}),
+		wait:    wait,
+		deliver: deliver,
+	}
 }
 
 func (r *reassembler) close() {
@@ -44,6 +55,7 @@ func (r *reassembler) close() {
 		r.timer = nil
 	}
 	clear(r.pending)
+	clear(r.skipped)
 }
 
 func (r *reassembler) stats() reassemblerStats {
@@ -51,15 +63,21 @@ func (r *reassembler) stats() reassemblerStats {
 	pending := len(r.pending)
 	r.mu.Unlock()
 	return reassemblerStats{
-		Delivered:   r.delivered.Load(),
-		Reordered:   r.reordered.Load(),
-		GapsSkipped: r.gapsSkipped.Load(),
-		Duplicates:  r.duplicates.Load(),
-		Pending:     pending,
+		Delivered:     r.delivered.Load(),
+		Reordered:     r.reordered.Load(),
+		LateDelivered: r.lateDelivered.Load(),
+		GapsSkipped:   r.gapsSkipped.Load(),
+		Duplicates:    r.duplicates.Load(),
+		Pending:       pending,
 	}
 }
 
 func (r *reassembler) push(seq uint64, packet []byte) {
+	if r.wait <= 0 {
+		r.deliver(packet)
+		r.delivered.Add(1)
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -72,6 +90,14 @@ func (r *reassembler) push(seq uint64, packet []byte) {
 		}
 	}
 	if seq < r.next {
+		// Deliver late packets from slower links that arrived after skipGap() instead of dropping them.
+		if _, wasSkipped := r.skipped[seq]; wasSkipped {
+			delete(r.skipped, seq)
+			r.deliver(packet)
+			r.delivered.Add(1)
+			r.lateDelivered.Add(1)
+			return
+		}
 		r.duplicates.Add(1)
 		return
 	}
@@ -134,7 +160,27 @@ func (r *reassembler) skipGap() {
 		return
 	}
 	if lowest > r.next {
-		r.gapsSkipped.Add(lowest - r.next)
+		gap := lowest - r.next
+		r.gapsSkipped.Add(gap)
+		// Remember skipped seqs so slower links' packets still get delivered on late arrival.
+		start := r.next
+		if gap > maxSkippedTrack {
+			start = lowest - maxSkippedTrack
+		}
+		for s := start; s < lowest; s++ {
+			r.skipped[s] = struct{}{}
+		}
+		if len(r.skipped) > maxSkippedTrack {
+			cutoff := uint64(0)
+			if lowest > maxSkippedTrack {
+				cutoff = lowest - maxSkippedTrack
+			}
+			for s := range r.skipped {
+				if s < cutoff {
+					delete(r.skipped, s)
+				}
+			}
+		}
 	}
 	r.next = lowest
 	r.flush()

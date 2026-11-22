@@ -298,9 +298,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.socksDisabledByUs = true
             }
 
-            // 3. Launch root speedbond client via native macOS Touch ID / admin prompt
+            // 3. Launch root speedbond client cleanly detached (no nohup inside osascript!)
             let launchCmd = """
-            nohup /bin/bash -c 'set -a; source /tmp/speedbond-launch.env; rm -f /tmp/speedbond-launch.env; exec \(self.baseDir)/speedbond client -server "$SPEEDBOND_SERVER" -links "$SPEEDBOND_LINKS" -pin "$SPEEDBOND_PIN"' >/tmp/open-speedify-client.log 2>&1 </dev/null &
+            /usr/bin/python3 -c 'import subprocess; subprocess.Popen(["/bin/bash","-c","set -a; source /tmp/speedbond-launch.env; rm -f /tmp/speedbond-launch.env; exec \(self.baseDir)/speedbond client -server \\"$SPEEDBOND_SERVER\\" -links \\"$SPEEDBOND_LINKS\\" -pin \\"$SPEEDBOND_PIN\\""], stdin=subprocess.DEVNULL, stdout=open("/tmp/open-speedify-client.log","wb"), stderr=subprocess.STDOUT, start_new_session=True)'
             """
             let ok = self.runAdminShell(launchCmd)
             DispatchQueue.main.async {
@@ -421,7 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         proofLines = ["Testing each link solo, then all bonded (~25s)…"]
         render()
         DispatchQueue.global(qos: .userInitiated).async {
-            let res = self.runShell("\(self.baseDir)/speedbond bench -seconds 6 -streams 4")
+            let res = self.runShell("\(self.baseDir)/speedbond bench -seconds 8 -streams 3")
             let lines = res.out
                 .split(separator: "\n")
                 .map { String($0).trimmingCharacters(in: .whitespaces) }

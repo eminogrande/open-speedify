@@ -145,7 +145,7 @@ func runClient(ctx context.Context, args []string) error {
 	pin := flags.String("pin", "", "relay certificate SHA-256 fingerprint")
 	tunName := flags.String("tun", "auto", "tunnel interface")
 	route := flags.Bool("route", true, "route IPv4 internet traffic through tunnel")
-	reorderWait := flags.Duration("reorder-wait", 60*time.Millisecond, "maximum wait for missing sequence numbers")
+	reorderWait := flags.Duration("reorder-wait", 0, "optional cross-link reorder wait (0 = direct delivery, recommended)")
 	controlAddr := flags.String("control", "127.0.0.1:19454", "local control HTTP address (empty to disable)")
 	flags.Parse(args)
 

@@ -39,7 +39,7 @@ func runRelay(ctx context.Context, args []string) error {
 	key := flags.String("key", "relay.key", "TLS private key")
 	tunName := flags.String("tun", "speedbond%d", "TUN interface")
 	configure := flags.Bool("configure", true, "configure TUN, forwarding and iptables NAT")
-	reorderWait := flags.Duration("reorder-wait", 60*time.Millisecond, "maximum wait for missing sequence numbers")
+	reorderWait := flags.Duration("reorder-wait", 0, "optional cross-link reorder wait (0 = direct delivery, recommended)")
 	flags.Parse(args)
 	token, err := requiredToken()
 	if err != nil {

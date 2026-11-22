@@ -17,18 +17,20 @@ setup_alfa_bridge() {
   wlx="$(ssh "${ssh_opts[@]}" alfa@127.0.0.1 'ip -4 -o addr show | awk "/wlx/{print \$2; exit}"' 2>/dev/null || true)"
   [[ -n "$wlx" ]] || return 1
 
-  # Deploy arm64 binary into VM if missing or outdated
+  # Deploy arm64 binary into VM if missing or outdated (atomic mv avoids ETXTBSY)
   if ! ssh "${ssh_opts[@]}" alfa@127.0.0.1 'test -x ~/speedbond-bridge' 2>/dev/null || \
      [[ "$(stat -f%m ./speedbond-arm64)" -gt "$(ssh "${ssh_opts[@]}" alfa@127.0.0.1 'stat -c%Y ~/speedbond-bridge 2>/dev/null || echo 0')" ]]; then
     scp -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P 2222 -i "$ALFA_KEY" \
-      ./speedbond-arm64 alfa@127.0.0.1:~/speedbond-bridge
-    ssh "${ssh_opts[@]}" alfa@127.0.0.1 'chmod +x ~/speedbond-bridge'
+      ./speedbond-arm64 alfa@127.0.0.1:~/speedbond-bridge.new
+    ssh "${ssh_opts[@]}" alfa@127.0.0.1 'chmod +x ~/speedbond-bridge.new && mv -f ~/speedbond-bridge.new ~/speedbond-bridge'
   fi
 
   # Start UDP bridge inside Alfa VM bound directly to wlx interface
   ssh "${ssh_opts[@]}" alfa@127.0.0.1 "
     sudo pkill -f '[s]peedbond-bridge bridge' 2>/dev/null || true
-    setsid sudo /home/alfa/speedbond-bridge bridge -listen :$ALFA_PORT -target $RELAY -iface $wlx >/tmp/speedbond-bridge.log 2>&1 </dev/null &
+    sudo rm -f /tmp/speedbond-bridge.log
+    sleep 0.2
+    sudo python3 -c 'import subprocess; subprocess.Popen([\"/home/alfa/speedbond-bridge\",\"bridge\",\"-listen\",\":$ALFA_PORT\",\"-target\",\"$RELAY\",\"-iface\",\"$wlx\"], stdin=subprocess.DEVNULL, stdout=open(\"/var/log/speedbond-bridge.log\",\"wb\"), stderr=subprocess.STDOUT, start_new_session=True)'
   "
 
   # Add live QEMU UDP hostfwd without rebooting VM

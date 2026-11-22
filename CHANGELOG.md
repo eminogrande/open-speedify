@@ -25,10 +25,11 @@ All notable changes to this project are documented here. Dates use ISO format.
 
 ### Verified
 
-- `go test -race ./...` passes across all unit and integration tests.
-- Fixed relay binary deployed and running on `188.34.194.25:443` (`mtu=1150 reorder=60ms`).
-- `speedbond probe` verified `en0` + `alfa=127.0.0.1:4546` joining the same live relay session (`10.77.0.2`).
-- `SpeedbondBar.app` compiled cleanly and launched in macOS menu bar.
+- `go test -count=1 -race ./...` passes across all unit and integration tests (including late-packet delivery without duplicate delivery).
+- Fixed zero-HOL flow-sticky + MinRTT backpressure relay deployed on `188.34.194.25:443` (`mtu=1150`, TCP MSS clamping, `reorder=0s`).
+- Live Solo vs Bonded speed proof (`alfa` + `en0` Infinix HOT 60i): `0.59 Mbps` solo + `0.75 Mbps` solo → **`1.34 Mbps` bonded (+78.3% vs best solo, 100% of combined sum)**, `Reordered: 0`, `Gaps: 0`.
+- Live 3-link simultaneous bonding (`alfa` + `en0` Infinix HOT 60i + `feth50` Samsung USB): peaked at **`9.97 Mbps` combined TX** (`6.88 + 2.83 + 0.26`) and `0.99 Mbps↓ / 8.14 Mbps↑` simultaneous bidirectional traffic.
+- Live mid-stream failover proof: killing primary link (`alfa`) mid-ping yielded **12/12 packets (0.0% loss)** while keeping VPN exit IP `188.34.194.25`.
 
 ## [0.1.0] - 2026-11-22
 

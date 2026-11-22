@@ -47,4 +47,13 @@ func TestReassemblerOrdersAndSkipsLostPackets(t *testing.T) {
 	if got := len(d.get()); got != 4 {
 		t.Fatalf("duplicate delivered: %d packets", got)
 	}
+	// Late packet from a slower link (seq 2 was skipped, never delivered) must still be delivered once.
+	r.push(2, []byte("late-two"))
+	if got := d.get(); len(got) != 5 || got[4] != "late-two" {
+		t.Fatalf("late skipped packet dropped: %v", got)
+	}
+	r.push(2, []byte("duplicate-two"))
+	if got := len(d.get()); got != 5 {
+		t.Fatalf("duplicate late packet delivered: %d", got)
+	}
 }
