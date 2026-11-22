@@ -1,5 +1,7 @@
 speedbond
 speedbond-linux
+speedbond-arm64
+SpeedbondBar.app/
 *.crt
 *.key
 *.log

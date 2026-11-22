@@ -26,6 +26,7 @@ func TestTwoQUICLinksAndFailover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer udp.Close()
 	listener, err := quic.Listen(udp, tlsConfig, quicConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +38,7 @@ func TestTwoQUICLinksAndFailover(t *testing.T) {
 	serverPool := newLinkPool()
 	serverPackets := make(chan uint64, 128)
 	serverReassembler := newReassembler(20*time.Millisecond, numberedDelivery(serverPackets))
+	defer serverReassembler.close()
 	go func() {
 		for id := byte(0); id < 2; id++ {
 			conn, err := listener.Accept(ctx)
@@ -62,7 +64,7 @@ func TestTwoQUICLinksAndFailover(t *testing.T) {
 			}
 			stream.Close()
 			go func() {
-				receiveDatagrams(conn, serverReassembler, &link.received)
+				receiveDatagrams(conn, serverReassembler, &link.received, &link.receivedBytes)
 				serverPool.remove(link.id, conn)
 			}()
 		}
@@ -77,6 +79,7 @@ func TestTwoQUICLinksAndFailover(t *testing.T) {
 	clientPool := newLinkPool()
 	clientPackets := make(chan uint64, 128)
 	clientReassembler := newReassembler(20*time.Millisecond, numberedDelivery(clientPackets))
+	defer clientReassembler.close()
 	session, _ := newSession()
 	for id := byte(0); id < 2; id++ {
 		link, _, err := dialClientLink(ctx, listener.Addr().(*net.UDPAddr), clientTLSConfig, token, session, id, "lo0")
@@ -87,10 +90,10 @@ func TestTwoQUICLinksAndFailover(t *testing.T) {
 			t.Fatal(err)
 		}
 		go func() {
-			receiveDatagrams(link.conn, clientReassembler, &link.received)
+			receiveDatagrams(link.conn, clientReassembler, &link.received, &link.receivedBytes)
 			clientPool.remove(link.id, link.conn)
 		}()
-		defer link.conn.CloseWithError(0, "test complete")
+		defer link.close(0, "test complete")
 	}
 	for i := uint64(0); i < 40; i++ {
 		if err := clientPool.send(numberedPacket(i)); err != nil {
@@ -106,7 +109,7 @@ func TestTwoQUICLinksAndFailover(t *testing.T) {
 	clientPool.mu.Lock()
 	dead := clientPool.links[0]
 	clientPool.mu.Unlock()
-	dead.conn.CloseWithError(0, "simulated link failure")
+	dead.close(0, "simulated link failure")
 	waitFor(t, func() bool { return clientPool.count() == 1 && serverPool.count() == 1 })
 	for i := uint64(40); i < 60; i++ {
 		if err := clientPool.send(numberedPacket(i)); err != nil {
@@ -124,6 +127,130 @@ func TestTwoQUICLinksAndFailover(t *testing.T) {
 			t.Fatalf("post-failover download %d arrived as %d", i, got)
 		}
 	}
+}
+
+func TestRelaySharedSessionReassemblyAndBridge(t *testing.T) {
+	dir := t.TempDir()
+	if err := generateCert(dir+"/relay.crt", dir+"/relay.key"); err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig, err := relayTLS(dir+"/relay.crt", dir+"/relay.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	listener, err := quic.Listen(udp, tlsConfig, quicConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	token := "relay-shared-session-secret"
+	delivered := make(chan uint64, 128)
+	server := newRelayServer(tokenHash(token), nil, 50*time.Millisecond, func(pkt []byte) error {
+		delivered <- binary.BigEndian.Uint64(pkt[20:28])
+		return nil
+	})
+	go func() {
+		for {
+			conn, err := listener.Accept(ctx)
+			if err != nil {
+				return
+			}
+			go server.handleConn(ctx, conn)
+		}
+	}()
+
+	// Also test UDP bridge for the second link (same path used for Alfa VM).
+	bridgeProbe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridgeAddr := bridgeProbe.LocalAddr().String()
+	bridgeProbe.Close()
+	go serveUDPBridge(ctx, bridgeAddr, listener.Addr().String(), "")
+	time.Sleep(50 * time.Millisecond)
+
+	cert, _ := tls.LoadX509KeyPair(dir+"/relay.crt", dir+"/relay.key")
+	pin := fmt.Sprintf("%x", sha256.Sum256(cert.Certificate[0]))
+	clientTLSConfig, err := clientTLS(pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session, _ := newSession()
+	pool := newLinkPool()
+	link0, ip0, err := dialClientLink(ctx, listener.Addr().(*net.UDPAddr), clientTLSConfig, token, session, 0, "lo0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer link0.close(0, "done")
+	link1, ip1, err := dialClientLink(ctx, listener.Addr().(*net.UDPAddr), clientTLSConfig, token, session, 1, "alfa="+bridgeAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer link1.close(0, "done")
+	if !ip0.Equal(ip1) {
+		t.Fatalf("expected same session IP, got %v vs %v", ip0, ip1)
+	}
+	pool.add(link0)
+	pool.add(link1)
+
+	for i := uint64(0); i < 40; i++ {
+		pkt := ipv4TestPacket(ip0, i)
+		if err := pool.send(pkt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := uint64(0); i < 40; i++ {
+		got := receiveNumber(t, delivered)
+		if got != i {
+			t.Fatalf("relay packet %d arrived as %d (reassembler not shared!)", i, got)
+		}
+	}
+
+	server.mu.Lock()
+	sess := server.sessions[session]
+	server.mu.Unlock()
+	if st := sess.reassembler.stats(); st.GapsSkipped != 0 {
+		t.Fatalf("expected 0 skipped gaps on shared relay reassembler, got %d", st.GapsSkipped)
+	}
+}
+
+func TestSmoothWeightedRoundRobin(t *testing.T) {
+	p := newLinkPool()
+	a := &bondLink{id: 0, name: "fast"}
+	b := &bondLink{id: 1, name: "slow"}
+	p.add(a)
+	p.add(b)
+	p.mu.Lock()
+	a.weight = 3
+	b.weight = 1
+	counts := map[byte]int{}
+	for i := 0; i < 40; i++ {
+		l := p.pickLocked(nil)
+		counts[l.id]++
+	}
+	p.mu.Unlock()
+	if counts[0] != 30 || counts[1] != 10 {
+		t.Fatalf("unexpected weighted distribution: %v", counts)
+	}
+}
+
+func ipv4TestPacket(srcIP net.IP, seq uint64) []byte {
+	pkt := make([]byte, 28)
+	pkt[0] = 0x45 // IPv4, IHL=5
+	copy(pkt[12:16], srcIP.To4())
+	copy(pkt[16:20], net.IPv4(1, 1, 1, 1).To4())
+	binary.BigEndian.PutUint64(pkt[20:28], seq)
+	return pkt
 }
 
 func numberedPacket(n uint64) []byte {

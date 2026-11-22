@@ -14,19 +14,22 @@ import (
 )
 
 type relaySession struct {
-	id         [16]byte
-	ip         net.IP
-	pool       *linkPool
-	emptySince atomic.Int64
+	id          [16]byte
+	ip          net.IP
+	pool        *linkPool
+	reassembler *reassembler
+	emptySince  atomic.Int64
 }
 
 type relayServer struct {
-	token    [32]byte
-	tun      *tunDevice
-	mu       sync.Mutex
-	sessions map[[16]byte]*relaySession
-	byIP     map[string]*relaySession
-	nextIP   uint32
+	token       [32]byte
+	tun         *tunDevice
+	writePacket func([]byte) error
+	reorderWait time.Duration
+	mu          sync.Mutex
+	sessions    map[[16]byte]*relaySession
+	byIP        map[string]*relaySession
+	nextIP      uint32
 }
 
 func runRelay(ctx context.Context, args []string) error {
@@ -36,7 +39,7 @@ func runRelay(ctx context.Context, args []string) error {
 	key := flags.String("key", "relay.key", "TLS private key")
 	tunName := flags.String("tun", "speedbond%d", "TUN interface")
 	configure := flags.Bool("configure", true, "configure TUN, forwarding and iptables NAT")
-	reorderWait := flags.Duration("reorder-wait", 30*time.Millisecond, "maximum wait for missing sequence numbers")
+	reorderWait := flags.Duration("reorder-wait", 60*time.Millisecond, "maximum wait for missing sequence numbers")
 	flags.Parse(args)
 	token, err := requiredToken()
 	if err != nil {
@@ -66,15 +69,16 @@ func runRelay(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer udp.Close()
 	listener, err := quic.Listen(udp, tlsConfig, quicConfig())
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
-	server := &relayServer{
-		token: tokenHash(token), tun: tun,
-		sessions: make(map[[16]byte]*relaySession), byIP: make(map[string]*relaySession), nextIP: 2,
-	}
+	server := newRelayServer(tokenHash(token), tun, *reorderWait, func(packet []byte) error {
+		_, err := tun.Write(packet)
+		return err
+	})
 	go server.expireSessions(ctx)
 	go func() {
 		<-ctx.Done()
@@ -82,17 +86,29 @@ func runRelay(ctx context.Context, args []string) error {
 		tun.Close()
 	}()
 	go server.readTUN(ctx)
-	log.Printf("relay listening=%s tunnel=%s", listener.Addr(), tun.Name())
+	log.Printf("relay listening=%s tunnel=%s mtu=%d reorder=%s", listener.Addr(), tun.Name(), tunnelMTU, *reorderWait)
 	for {
 		conn, err := listener.Accept(ctx)
 		if err != nil {
 			return err
 		}
-		go server.handleConn(ctx, conn, *reorderWait)
+		go server.handleConn(ctx, conn)
 	}
 }
 
-func (s *relayServer) handleConn(ctx context.Context, conn *quic.Conn, reorderWait time.Duration) {
+func newRelayServer(token [32]byte, tun *tunDevice, reorderWait time.Duration, writePacket func([]byte) error) *relayServer {
+	return &relayServer{
+		token:       token,
+		tun:         tun,
+		writePacket: writePacket,
+		reorderWait: reorderWait,
+		sessions:    make(map[[16]byte]*relaySession),
+		byIP:        make(map[string]*relaySession),
+		nextIP:      2,
+	}
+}
+
+func (s *relayServer) handleConn(ctx context.Context, conn *quic.Conn) {
 	defer conn.CloseWithError(0, "connection closed")
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
@@ -119,20 +135,15 @@ func (s *relayServer) handleConn(ctx context.Context, conn *quic.Conn, reorderWa
 		return
 	}
 	stream.Close()
-	log.Printf("session=%x link=%d remote=%s connected address=%s", h.Session[:4], h.Link, conn.RemoteAddr(), session.ip)
-	reassembler := newReassembler(reorderWait, func(packet []byte) error {
-		if len(packet) < 20 || !net.IP(packet[12:16]).Equal(session.ip) {
-			return fmt.Errorf("invalid source address")
-		}
-		_, err := s.tun.Write(packet)
-		return err
-	})
-	err = receiveDatagrams(conn, reassembler, &link.received)
+	log.Printf("session=%x link=%d remote=%s connected address=%s active_links=%d",
+		h.Session[:4], h.Link, conn.RemoteAddr(), session.ip, session.pool.count())
+	err = receiveDatagrams(conn, session.reassembler, &link.received, &link.receivedBytes)
 	session.pool.remove(h.Link, conn)
 	if session.pool.count() == 0 {
 		session.emptySince.Store(time.Now().UnixNano())
 	}
-	log.Printf("session=%x link=%d disconnected: %v", h.Session[:4], h.Link, err)
+	log.Printf("session=%x link=%d disconnected: %v active_links=%d",
+		h.Session[:4], h.Link, err, session.pool.count())
 }
 
 func (s *relayServer) sessionFor(id [16]byte) (*relaySession, error) {
@@ -151,16 +162,27 @@ func (s *relayServer) sessionFor(id [16]byte) (*relaySession, error) {
 		if s.byIP[ip.String()] != nil {
 			continue
 		}
-		session := &relaySession{id: id, ip: ip, pool: newLinkPool()}
+		sessionIP := ip
+		session := &relaySession{
+			id:   id,
+			ip:   sessionIP,
+			pool: newLinkPool(),
+			reassembler: newReassembler(s.reorderWait, func(packet []byte) error {
+				if len(packet) < 20 || packet[0]>>4 != 4 || !net.IP(packet[12:16]).Equal(sessionIP) {
+					return fmt.Errorf("invalid source address")
+				}
+				return s.writePacket(packet)
+			}),
+		}
 		s.sessions[id] = session
-		s.byIP[ip.String()] = session
+		s.byIP[sessionIP.String()] = session
 		return session, nil
 	}
 	return nil, fmt.Errorf("no tunnel addresses available")
 }
 
 func (s *relayServer) readTUN(ctx context.Context) {
-	buf := make([]byte, tunnelMTU)
+	buf := make([]byte, maxPacketSize)
 	for {
 		n, err := s.tun.Read(buf)
 		if err != nil {
@@ -185,12 +207,18 @@ func (s *relayServer) expireSessions(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			s.mu.Lock()
+			for _, session := range s.sessions {
+				session.reassembler.close()
+			}
+			s.mu.Unlock()
 			return
 		case now := <-ticker.C:
 			s.mu.Lock()
 			for id, session := range s.sessions {
 				empty := session.emptySince.Load()
 				if empty != 0 && now.Sub(time.Unix(0, empty)) > 2*time.Minute {
+					session.reassembler.close()
 					delete(s.sessions, id)
 					delete(s.byIP, session.ip.String())
 				}

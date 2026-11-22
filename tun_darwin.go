@@ -121,14 +121,14 @@ func configureRelayHost(ip net.IP, interfaceName string) (func(), error) {
 	if strings.HasPrefix(gateway, "index:") {
 		return func() {}, nil
 	}
-	if err := run("route", "-n", "add", "-host", ip.String(), gateway); err != nil {
+	if err := run("route", "-n", "add", "-host", "-ifscope", interfaceName, ip.String(), gateway); err != nil {
 		if strings.Contains(err.Error(), "File exists") {
 			return func() {}, nil
 		}
 		return nil, err
 	}
 	return func() {
-		exec.Command("route", "-n", "delete", "-host", ip.String(), gateway).Run()
+		exec.Command("route", "-n", "delete", "-host", "-ifscope", interfaceName, ip.String(), gateway).Run()
 	}, nil
 }
 

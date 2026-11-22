@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	protocolName = "open-speedify/1"
-	helloSize    = 16 + 1 + sha256.Size
-	tunnelMTU    = 1200
+	protocolName  = "open-speedify/1"
+	helloSize     = 16 + 1 + sha256.Size
+	tunnelMTU     = 1150
+	maxPacketSize = 1400
 )
 
 type hello struct {
