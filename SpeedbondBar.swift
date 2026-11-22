@@ -292,9 +292,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            // 2. Disable macOS SOCKS5 so browsers route through bonded tunnel
-            if self.detectSocksProxy() {
-                _ = self.runShell("networksetup -setsocksfirewallproxystate Wi-Fi off")
+            // 2. Pause alfa-autoswitch + disable macOS SOCKS5 so browsers use bonded VPN (not Alfa-only SOCKS5)
+            let alfaMode = self.runShell("cat /tmp/alfa-mode 2>/dev/null || echo auto").out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if alfaMode != "off" || self.detectSocksProxy() {
+                _ = self.runShell("echo off > /tmp/alfa-mode; networksetup -setsocksfirewallproxystate Wi-Fi off")
                 self.socksDisabledByUs = true
             }
 
@@ -322,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         postControl("/stop") { [weak self] _ in
             guard let self = self else { return }
             if self.socksDisabledByUs {
-                _ = self.runShell("networksetup -setsocksfirewallproxystate Wi-Fi on")
+                _ = self.runShell("echo auto > /tmp/alfa-mode; networksetup -setsocksfirewallproxystate Wi-Fi on")
                 self.socksDisabledByUs = false
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
@@ -439,8 +440,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleSocks() {
         let target = socksOn ? "off" : "on"
+        let mode = socksOn ? "off" : "auto"
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = self.runShell("networksetup -setsocksfirewallproxystate Wi-Fi \(target)")
+            _ = self.runShell("echo \(mode) > /tmp/alfa-mode; networksetup -setsocksfirewallproxystate Wi-Fi \(target)")
             let nowOn = self.detectSocksProxy()
             DispatchQueue.main.async {
                 self.socksOn = nowOn

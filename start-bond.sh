@@ -104,10 +104,12 @@ if [[ "$PREPARE_ONLY" -eq 1 ]]; then
 fi
 export SPEEDBOND_TOKEN="$(security find-generic-password -a "$USER" -s open-speedify-relay-token -w)"
 
-# Remember macOS SOCKS5 state and disable during bonded session so browsers use the tunnel
+# Pause alfa-autoswitch + disable macOS SOCKS5 during bonded session so browsers use the VPN tunnel
 SOCKS_WAS_ON=0
-if networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null | grep -q "Enabled: Yes"; then
+ALFA_PREV_MODE="$(cat /tmp/alfa-mode 2>/dev/null || true)"
+if [[ "$ALFA_PREV_MODE" != "off" ]] || networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null | grep -q "Enabled: Yes"; then
   SOCKS_WAS_ON=1
+  echo off > /tmp/alfa-mode 2>/dev/null || true
   networksetup -setsocksfirewallproxystate Wi-Fi off 2>/dev/null || true
 fi
 
@@ -125,6 +127,7 @@ cleanup() {
     fi
   fi
   if [[ "$SOCKS_WAS_ON" -eq 1 ]]; then
+    [[ -n "$ALFA_PREV_MODE" ]] && echo "$ALFA_PREV_MODE" > /tmp/alfa-mode 2>/dev/null || true
     networksetup -setsocksfirewallproxystate Wi-Fi on 2>/dev/null || true
   fi
 }
