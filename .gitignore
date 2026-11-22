@@ -1,0 +1,6 @@
+speedbond
+speedbond-linux
+*.crt
+*.key
+*.log
+.env

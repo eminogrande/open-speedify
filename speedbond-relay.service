@@ -1,0 +1,15 @@
+[Unit]
+Description=Open Speedify bonding relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/speedbond/environment
+ExecStart=/usr/local/sbin/speedbond relay -listen :443 -cert /etc/speedbond/relay.crt -key /etc/speedbond/relay.key
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
