@@ -186,8 +186,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-            // 3. Auto-join ANY active physical IPv4 interface (Wi-Fi, Android feth50, iPhone, Ethernet)
-            let ifacesOut = self.runShell("\(self.baseDir)/speedbond interfaces | awk '$2 !~ /^(utun|awdl|llw|bridge|ap|lo)/ && $0 ~ /[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\\// { print $2 }'").out
+            // 3. Auto-join ANY active physical IPv4 interface (skip link-local 169.254.x.x)
+            let ifacesOut = self.runShell("\(self.baseDir)/speedbond interfaces | awk '$2 !~ /^(utun|awdl|llw|bridge|ap|lo)/ && $0 ~ /[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\\// && $0 !~ /169\\.254\\./ { print $2 }'").out
             for line in ifacesOut.split(separator: "\n") {
                 let dev = String(line).trimmingCharacters(in: .whitespaces)
                 if !dev.isEmpty && existing[dev] == nil {
