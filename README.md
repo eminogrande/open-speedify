@@ -2,6 +2,10 @@
 
 Open-source, self-hosted **multi-link QUIC bonding VPN** for macOS + Linux VPS. Combine **multiple Wi-Fi networks, phones (iPhone & Android), long-range USB Wi-Fi antennas, and Ethernet** into a single encrypted VPN connection with one stable public IP—for faster speeds and drop-resistant calls.
 
+<p align="center">
+  <img src="docs/screenshot.jpg" alt="SpeedbondBar combining 4 connections live at 11.6 Mbps download" width="380">
+</p>
+
 ```text
                  ┌── QUIC DATAGRAM over Mac Wi-Fi (en0) ───────────┐
                  ├── QUIC DATAGRAM over Alfa USB Antenna (VM UDP) ─┼── Your Linux VPS ── Internet
