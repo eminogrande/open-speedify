@@ -104,9 +104,14 @@ func bindToInterface(fd uintptr, name string) error {
 }
 
 func configureRelayHost(ip net.IP, interfaceName string) (func(), error) {
-	out, err := exec.Command("route", "-n", "get", "-ifscope", interfaceName, ip.String()).CombinedOutput()
+	// Look up the interface's current default gateway (not ip) so a stale host route
+	// from a previous Wi-Fi network or subnet can never shadow the new gateway.
+	out, err := exec.Command("route", "-n", "get", "-ifscope", interfaceName, "default").CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("find gateway for %s: %w: %s", interfaceName, err, out)
+		out, err = exec.Command("route", "-n", "get", "-ifscope", interfaceName, ip.String()).CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("find gateway for %s: %w: %s", interfaceName, err, out)
+		}
 	}
 	var gateway string
 	for _, line := range strings.Split(string(out), "\n") {
@@ -121,6 +126,8 @@ func configureRelayHost(ip net.IP, interfaceName string) (func(), error) {
 	if strings.HasPrefix(gateway, "index:") {
 		return func() {}, nil
 	}
+	// Delete any stale host route for this interface before adding the current gateway.
+	exec.Command("route", "-n", "delete", "-host", "-ifscope", interfaceName, ip.String()).Run()
 	if err := run("route", "-n", "add", "-host", "-ifscope", interfaceName, ip.String(), gateway); err != nil {
 		if strings.Contains(err.Error(), "File exists") {
 			return func() {}, nil

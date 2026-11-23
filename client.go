@@ -433,7 +433,13 @@ func (m *clientManager) manageLink(ctx context.Context, ml *managedLink) {
 			ml.mu.Lock()
 			ml.state = "DOWN"
 			ml.lastErr = err.Error()
+			// Drop cached host route on failure so Wi-Fi/subnet switches pick up the new gateway on retry.
+			rc := ml.routeCleanup
+			ml.routeCleanup = nil
 			ml.mu.Unlock()
+			if rc != nil {
+				rc()
+			}
 			log.Printf("link=%s connect failed: %v", ml.spec.Name, err)
 			if link != nil {
 				link.close(1, "setup failed")
@@ -470,7 +476,13 @@ func (m *clientManager) manageLink(ctx context.Context, ml *managedLink) {
 				ml.lastErr = err.Error()
 			}
 		}
+		// Refresh host route on reconnect in case this interface switched Wi-Fi networks or subnets.
+		rc := ml.routeCleanup
+		ml.routeCleanup = nil
 		ml.mu.Unlock()
+		if rc != nil {
+			rc()
+		}
 		link.close(0, "reconnecting")
 
 		if ml.paused.Load() || ctx.Err() != nil {
