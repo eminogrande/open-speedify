@@ -95,11 +95,11 @@ else
   if setup_alfa_bridge; then
     links+=("alfa=127.0.0.1:$ALFA_PORT")
   fi
-  # Auto-detect ALL active physical IPv4 interfaces (Wi-Fi, Android/iPhone USB, Ethernet, extra Wi-Fi)
+  # Auto-detect ALL active physical IPv4 interfaces (skip link-local 169.254.x.x)
   while IFS= read -r dev; do
     [[ -n "$dev" ]] && links+=("$dev")
   done < <(./speedbond interfaces | awk '
-    $2 !~ /^(utun|awdl|llw|bridge|ap|lo)/ && $0 ~ /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\// { print $2 }
+    $2 !~ /^(utun|awdl|llw|bridge|ap|lo)/ && $0 ~ /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\// && $0 !~ /169\.254\./ { print $2 }
   ')
 fi
 

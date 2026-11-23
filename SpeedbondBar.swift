@@ -89,8 +89,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "en0": return "Mac Wi-Fi"
         case "alfa": return "Alfa Antenna"
         case "feth50": return "Android Phone (USB)"
-        case "en4", "en5", "en6", "en7", "en8": return "USB Phone / Ethernet (\(name))"
-        default: return name
+        default:
+            if name.hasPrefix("en"), let num = Int(name.dropFirst(2)) {
+                return num >= 7 ? "iPhone (USB)" : "USB Ethernet (\(name))"
+            }
+            return name
         }
     }
 
@@ -268,9 +271,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else if link.paused {
                     addLabel("   ⏸ \(name)   (paused)", dim: true)
                 } else {
-                    let hint = link.name == "feth50"
-                        ? "waiting for phone data…"
-                        : "connecting…"
+                    let hint: String
+                    if link.name == "feth50" {
+                        hint = "waiting for Android data…"
+                    } else if friendlyName(link.name) == "iPhone (USB)" {
+                        hint = "turn on Personal Hotspot on iPhone"
+                    } else {
+                        hint = "connecting…"
+                    }
                     addLabel("   🟡 \(name)   (\(hint))", dim: true)
                 }
             }
