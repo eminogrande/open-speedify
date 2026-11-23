@@ -54,17 +54,17 @@ macOS (utun) ────┼── QUIC DATAGRAM over Alfa VM UDP bridge ──�
 
 ## Quick Start (macOS)
 
-### 1. Menu Bar App (`SpeedbondBar.app`)
+### 1. Menu Bar App (`SpeedbondBar.app`) — Zero-Jargon Autopilot
 Build and launch the native status bar controller:
 ```bash
-swiftc -O -swift-version 5 -framework Cocoa SpeedbondBar.swift -o SpeedbondBar.app/Contents/MacOS/SpeedbondBar
+swiftc -O -swift-version 5 -framework Cocoa -framework CoreWLAN SpeedbondBar.swift -o SpeedbondBar.app/Contents/MacOS/SpeedbondBar
 open SpeedbondBar.app
 ```
-From the menu bar (`⚡ Bond OFF` → `🟢 BOND 2x`):
-- **▶ Start Bonding** — auto-detects Alfa VM bridge + all active IPv4 interfaces (Wi-Fi, phone, Ethernet) and disables macOS SOCKS5 while bonded so browsers use the tunnel.
-- **📱 Connect Android USB Tether** — starts `rndis-tether` and hot-adds `feth50` live.
-- **➕ Hot-Add `<iface>`** — appears automatically when you plug in a phone, USB Wi-Fi, or Ethernet adapter.
-- **⚡ Run Speed Proof (Solo vs Bonded)** — isolates each link solo, then benchmarks all combined and prints `% faster`.
+From the menu bar (`⚪ Bond OFF` → `🟢 Combined 2x`):
+- **▶ Turn ON / ■ Turn OFF** — one click. Automatically discovers & combines Mac Wi-Fi, Alfa Antenna, Android/iPhone USB, and Ethernet, and keeps browsers routed through the VPN.
+- **Background Autopilot** — plug in a phone or wake from sleep and Speedbond auto-joins new connections and self-heals Alfa/USB links without manual clicks.
+- **📶 Join Another Wi-Fi…** — scans nearby Wi-Fi networks and connects Mac Wi-Fi or Alfa Antenna to a 2nd network (prompting for password only if not already saved).
+- **⚡ Test Speed (Alone vs Combined)** — plain-English speed proof right in the menu bar; all technical details stay tucked inside **Advanced ▸**.
 
 ### 2. Terminal Launcher + Live TUI (`bond`)
 ```bash

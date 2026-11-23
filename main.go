@@ -390,8 +390,16 @@ func runBench(ctx context.Context, args []string) error {
 func measureDownload(parent context.Context, targetURL string, streams int, dur time.Duration) (float64, int64, error) {
 	ctx, cancel := context.WithTimeout(parent, dur)
 	defer cancel()
-	// Force IPv4 so macOS doesn't bypass the IPv4 tunnel over IPv6, and ignore system SOCKS proxy.
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	// Force IPv4 so macOS doesn't bypass the IPv4 tunnel over IPv6, ignore system SOCKS proxy,
+	// and use 1.1.1.1 over the tunnel so DNS stays reliable even after macOS sleep/wake.
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 3 * time.Second}
+			return d.DialContext(ctx, "udp4", "1.1.1.1:53")
+		},
+	}
+	dialer := &net.Dialer{Timeout: 6 * time.Second, Resolver: resolver}
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {

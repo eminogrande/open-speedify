@@ -15,6 +15,26 @@ setup_alfa_bridge() {
   local ssh_opts=(-q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -p 2222 -i "$ALFA_KEY")
   local wlx
   wlx="$(ssh "${ssh_opts[@]}" alfa@127.0.0.1 'ip -4 -o addr show | awk "/wlx/{print \$2; exit}"' 2>/dev/null || true)"
+  # Auto-heal Alfa Wi-Fi DHCP after Mac sleep if dongle is present without an IPv4 address
+  if [[ -z "$wlx" ]] && ioreg -p IOUSB -w0 2>/dev/null | grep -q '802\.11ac'; then
+    local saved_ssid="" saved_pass=""
+    if [[ -f "$ALFA_DIR/wifi.env" ]]; then
+      # shellcheck disable=SC1090
+      source "$ALFA_DIR/wifi.env" 2>/dev/null || true
+      saved_ssid="${SSID:-}"
+      saved_pass="${PASS:-}"
+    fi
+    if [[ -n "$saved_ssid" ]]; then
+      "$ALFA_DIR/alfa.sh" wifi "$saved_ssid" "$saved_pass" >/dev/null 2>&1 || {
+        "$ALFA_DIR/alfa.sh" usb-off >/dev/null 2>&1 || true
+        sleep 1
+        "$ALFA_DIR/alfa.sh" usb-on >/dev/null 2>&1 || true
+        sleep 2
+        "$ALFA_DIR/alfa.sh" wifi "$saved_ssid" "$saved_pass" >/dev/null 2>&1 || true
+      }
+      wlx="$(ssh "${ssh_opts[@]}" alfa@127.0.0.1 'ip -4 -o addr show | awk "/wlx/{print \$2; exit}"' 2>/dev/null || true)"
+    fi
+  fi
   [[ -n "$wlx" ]] || return 1
 
   # Deploy arm64 binary into VM if missing or outdated (atomic mv avoids ETXTBSY)
