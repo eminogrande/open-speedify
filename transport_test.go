@@ -262,6 +262,59 @@ func TestClientSyncTunnelIP(t *testing.T) {
 	}
 }
 
+func TestPickFastestRelay(t *testing.T) {
+	dir := t.TempDir()
+	if err := generateCert(dir+"/relay.crt", dir+"/relay.key"); err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig, err := relayTLS(dir+"/relay.crt", dir+"/relay.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, _ := tls.LoadX509KeyPair(dir+"/relay.crt", dir+"/relay.key")
+	pin := fmt.Sprintf("%x", sha256.Sum256(cert.Certificate[0]))
+	token := "pick-fastest-relay-secret"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start one live relay on loopback
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	listener, err := quic.Listen(udp, tlsConfig, quicConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	srv := newRelayServer(tokenHash(token), nil, 0, func([]byte) error { return nil })
+	go func() {
+		for {
+			conn, err := listener.Accept(ctx)
+			if err != nil {
+				return
+			}
+			go srv.handleConn(ctx, conn)
+		}
+	}()
+
+	relays := []relayEntry{
+		{Name: "Dead", Server: "127.0.0.1:1", Pin: pin, Token: token},
+		{Name: "Live", Server: listener.Addr().String(), Pin: pin, Token: token},
+	}
+	picked := pickBestRelay(ctx, relays, "auto", 2*time.Second)
+	if picked.Best == nil || picked.Best.Name != "Live" || !picked.Best.OK {
+		t.Fatalf("expected Live relay to be picked, got %+v", picked)
+	}
+	// If preferred relay is dead, automatically falls back to fastest healthy relay
+	fallback := pickBestRelay(ctx, relays, "Dead", 1*time.Second)
+	if fallback.Best == nil || fallback.Best.Name != "Live" {
+		t.Fatalf("expected fallback to Live relay, got %+v", fallback)
+	}
+}
+
 func ipv4TestPacket(srcIP net.IP, seq uint64) []byte {
 	pkt := make([]byte, 28)
 	pkt[0] = 0x45 // IPv4, IHL=5

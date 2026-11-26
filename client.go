@@ -104,6 +104,7 @@ type linkStatusJSON struct {
 type clientStatusJSON struct {
 	Running       bool             `json:"running"`
 	Server        string           `json:"server"`
+	RelayName     string           `json:"relay_name,omitempty"`
 	Tunnel        string           `json:"tunnel"`
 	TunnelIP      string           `json:"tunnel_ip"`
 	MTU           int              `json:"mtu"`
@@ -121,6 +122,7 @@ type clientManager struct {
 	ctx         context.Context
 	cancelAll   context.CancelFunc
 	serverStr   string
+	relayName   string
 	remote      *net.UDPAddr
 	tlsConfig   *tls.Config
 	token       string
@@ -141,6 +143,7 @@ type clientManager struct {
 func runClient(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("client", flag.ExitOnError)
 	server := flags.String("server", "", "relay address host:port")
+	relayName := flags.String("relay-name", "", "friendly relay name for UI (optional)")
 	linkNames := flags.String("links", "", "comma-separated links, e.g. en0,feth50,alfa=127.0.0.1:4546")
 	pin := flags.String("pin", "", "relay certificate SHA-256 fingerprint")
 	tunName := flags.String("tun", "auto", "tunnel interface")
@@ -189,6 +192,7 @@ func runClient(ctx context.Context, args []string) error {
 		ctx:         runCtx,
 		cancelAll:   cancelAll,
 		serverStr:   *server,
+		relayName:   strings.TrimSpace(*relayName),
 		remote:      remote,
 		tlsConfig:   tlsConfig,
 		token:       token,
@@ -582,6 +586,7 @@ func (m *clientManager) status() clientStatusJSON {
 	return clientStatusJSON{
 		Running:     m.ctx.Err() == nil,
 		Server:      m.serverStr,
+		RelayName:   m.relayName,
 		Tunnel:      m.tunName,
 		TunnelIP:    tunIP,
 		MTU:         tunnelMTU,

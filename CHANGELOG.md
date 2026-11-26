@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here. Dates use ISO format.
 
+## [0.5.0] - 2026-11-26
+
+### Added
+
+- **Multi-relay auto-fastest selection (`pick.go`, `relays.example.json`):** Add as many VPS relays as you want in gitignored `relays.json` (chmod `600`). `speedbond pick` probes all configured relays in parallel over QUIC (binding to your physical interface so it even works accurately while bonded) and automatically selects the lowest-latency healthy server.
+- **One-command VPS relay deployer (`deploy-relay.sh`):** Cross-compiles for the VPS architecture (`amd64`/`arm64`), installs `/usr/local/sbin/speedbond` + `speedbond-relay.service`, generates a unique TLS cert pin + random `SPEEDBOND_TOKEN`, tunes kernel UDP buffers (`26 MB`), opens UFW UDP `443`, and appends the relay to your local gitignored `relays.json`.
+- **Dynamic relay switcher in `SpeedbondBar.swift`:** Displays active relay name (`st.relay_name`) dynamically and adds `🔧 More ▸ 🌍 Server ▸` (`⚡ Auto (Fastest)`, per-relay selector, and `🔍 Check Server Speeds`).
+
+### Changed
+
+- **100% open-source portable config:** Removed all hardcoded relay IPs, cert pins, and personal `/Users/...` paths from `start-bond.sh`, `SpeedbondBar.swift`, and `speedbond-tui.py`, and deleted obsolete day-1 PoC scripts (`start-poc.sh`, `run-e2e.sh`).
+
+### Verified
+
+- `git grep` confirms zero personal IPs, cert pins, or home paths remain in tracked files.
+- `go test -count=1 -race ./...` passes (including new `TestPickFastestRelay`).
+- Live `./speedbond pick` and `./start-bond.sh --prepare` succeed even while bonded on `utun5`.
+
 ## [0.4.0] - 2026-11-26
 
 ### Fixed

@@ -6,3 +6,4 @@ SpeedbondBar.app/
 *.key
 *.log
 .env
+relays.json

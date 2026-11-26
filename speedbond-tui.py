@@ -56,8 +56,9 @@ def detect_candidates(existing_names):
     """Detect physical IPv4 interfaces + Alfa UDP bridge if active."""
     cands = []
     # Check Alfa bridge port or VM
+    alfa_dir = os.path.expanduser(os.environ.get("ALFA_DIR", "~/Developer/alfa-vm"))
     if "alfa" not in existing_names:
-        if os.path.exists("/Users/eminmahrt/Developer/alfa-vm/monitor.sock"):
+        if os.path.exists(os.path.join(alfa_dir, "monitor.sock")):
             cands.append(("alfa=127.0.0.1:4546", "Alfa antenna VM UDP bridge"))
     code, out = run_cmd([BIN, "interfaces"], timeout=2)
     if code == 0:

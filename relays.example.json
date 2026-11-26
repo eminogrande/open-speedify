@@ -1,0 +1,17 @@
+{
+  "selected": "auto",
+  "relays": [
+    {
+      "name": "🇩🇪 Germany",
+      "server": "YOUR_VPS_IP:443",
+      "pin": "YOUR_RELAY_CERT_SHA256_PIN",
+      "token": "YOUR_SECRET_TOKEN_MIN_16_CHARS"
+    },
+    {
+      "name": "🇰🇪 Nairobi",
+      "server": "SECOND_VPS_IP:443",
+      "pin": "SECOND_RELAY_CERT_SHA256_PIN",
+      "token": "SECOND_SECRET_TOKEN"
+    }
+  ]
+}

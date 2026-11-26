@@ -53,6 +53,8 @@ func main() {
 		err = runBench(ctx, os.Args[2:])
 	case "probe":
 		err = runProbe(ctx, os.Args[2:])
+	case "pick":
+		err = runPick(ctx, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -72,6 +74,7 @@ func usage() {
   sudo -E SPEEDBOND_TOKEN=... speedbond client -server VPS:443 -links en0,feth50,alfa=127.0.0.1:4546 -pin FINGERPRINT
   speedbond status [-json]
   speedbond ctl <add|remove|pause|resume|stop> [arg]
+  speedbond pick [-config relays.json] [-prefer NAME] [-json]
   speedbond bench [-url URL] [-streams 4] [-seconds 8]
 `)
 }

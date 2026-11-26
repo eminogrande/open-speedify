@@ -33,6 +33,7 @@ struct LinkStatus: Decodable {
 struct ClientStatus: Decodable {
     let running: Bool
     let server: String
+    let relay_name: String?
     let tunnel: String
     let tunnel_ip: String
     let mtu: Int
@@ -46,9 +47,30 @@ struct ClientStatus: Decodable {
     let links: [LinkStatus]
 }
 
+struct RelayEntry: Codable {
+    let name: String
+    let server: String
+    let pin: String
+    let token: String?
+    let token_keychain: String?
+}
+
+struct RelayConfig: Codable {
+    var selected: String?
+    var relays: [RelayEntry]
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let baseDir = "/Users/eminmahrt/Developer/open-speedify"
-    private let alfaDir = "/Users/eminmahrt/Developer/alfa-vm"
+    private let baseDir: String = {
+        if let env = ProcessInfo.processInfo.environment["SPEEDBOND_DIR"], !env.isEmpty { return env }
+        let appParent = URL(fileURLWithPath: Bundle.main.bundlePath).deletingLastPathComponent().path
+        if FileManager.default.fileExists(atPath: appParent + "/start-bond.sh") { return appParent }
+        return NSHomeDirectory() + "/Developer/open-speedify"
+    }()
+    private let alfaDir: String = {
+        if let env = ProcessInfo.processInfo.environment["ALFA_DIR"], !env.isEmpty { return env }
+        return NSHomeDirectory() + "/Developer/alfa-vm"
+    }()
     private let ctrlURL = "http://127.0.0.1:19454"
 
     private var statusItem: NSStatusItem!
@@ -86,6 +108,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setNote(_ text: String?) {
         lastNote = text
         lastNoteTime = Date()
+    }
+
+    // MARK: - Relay Config (relays.json)
+
+    private func relayConfigPath() -> String {
+        if let env = ProcessInfo.processInfo.environment["SPEEDBOND_CONFIG"], !env.isEmpty { return env }
+        let local = baseDir + "/relays.json"
+        if FileManager.default.fileExists(atPath: local) { return local }
+        return NSHomeDirectory() + "/.config/open-speedify/relays.json"
+    }
+
+    private func loadRelayConfig() -> RelayConfig? {
+        guard let data = FileManager.default.contents(atPath: relayConfigPath()) else { return nil }
+        return try? JSONDecoder().decode(RelayConfig.self, from: data)
+    }
+
+    private func saveSelectedRelay(_ selection: String) {
+        let path = relayConfigPath()
+        guard var cfg = loadRelayConfig() else { return }
+        cfg.selected = selection
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? enc.encode(cfg) {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
     }
 
     // MARK: - Friendly Emoji Labels
@@ -159,11 +206,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }.resume()
     }
 
-    /// Fully automatic discovery while Open Speedify is ON:
-    /// - Keeps macOS system SOCKS5 proxy OFF while bonded (never modifies /tmp/alfa-mode)
-    /// - Auto-adds EVERY active physical IPv4 interface (Wi-Fi, iPhone, Android, Ethernet)
-    /// - Auto-bridges and hot-adds Alfa Antenna whenever plugged in & VM is up
-    /// - Auto-prunes unplugged USB interfaces so link list stays clean
     private func autopilotCheck(status st: ClientStatus) {
         guard !autopilotBusy else { return }
         autopilotBusy = true
@@ -171,12 +213,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer { self?.autopilotBusy = false }
             guard let self = self else { return }
 
-            // 1. Keep system SOCKS5 off while bonded (without modifying /tmp/alfa-mode)
+            // 1. Keep system SOCKS5 off while bonded (never touch /tmp/alfa-mode)
             self.clearMacOSSocksIfEnabled()
 
             let existing = Dictionary(uniqueKeysWithValues: st.links.map { ($0.name, $0) })
 
-            // 2. Auto-connect Android USB tether if Samsung/Android plugged in without feth50 IP
+            // 2. Auto-connect Android USB tether if plugged in without feth50 IP
             let hasAndroidUSB = self.runShell("ioreg -p IOUSB -w0 2>/dev/null | grep -qiE 'SAMSUNG_Android|Android'").code == 0
             if hasAndroidUSB && self.runShell("ipconfig getifaddr feth50").out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if Date().timeIntervalSince(self.lastPhoneHeal) > 25 {
@@ -185,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-            // 3. Discover ALL active physical IPv4 interfaces (skip link-local 169.254.x.x & virtuals)
+            // 3. Discover ALL active physical IPv4 interfaces
             let ifacesOut = self.runShell("\(self.baseDir)/speedbond interfaces | awk '$2 !~ /^(utun|awdl|llw|bridge|ap|lo|anpi|anri)/ && $0 ~ /[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\\// && $0 !~ /169\\.254\\./ { print $2 }'").out
             var liveIfaces = Set<String>()
             for line in ifacesOut.split(separator: "\n") {
@@ -234,7 +276,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             } else if let al = alfaLink, al.state != "UP" && !al.paused {
-                // Alfa unplugged or turned off -> remove stale link
                 self.postControlSync("/links/remove?name=alfa")
             }
         }
@@ -276,8 +317,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 addLabel("🔴 Reconnecting…", bold: true)
             }
-            addLabel(String(format: "   ↓ %.1f Mbps  ↑ %.1f Mbps  ·  🇩🇪 VPN",
-                            st.total_rx_mbps, st.total_tx_mbps), dim: true)
+            let relayLabel = (st.relay_name?.isEmpty == false) ? st.relay_name! : "🌐 \(st.server)"
+            addLabel(String(format: "   ↓ %.1f Mbps  ↑ %.1f Mbps  ·  %@",
+                            st.total_rx_mbps, st.total_tx_mbps, relayLabel), dim: true)
 
             for link in st.links {
                 let label = friendlyLabel(link.name)
@@ -304,7 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if !proofLines.isEmpty {
             menu.addItem(.separator())
-            addLabel(benchRunning ? "⚡ Testing speed…" : "📊 Speed Test", bold: true)
+            addLabel(benchRunning ? "⚡ Testing…" : "📊 Result", bold: true)
             for line in proofLines {
                 addLabel("   \(friendlyProofLine(line))")
             }
@@ -335,6 +377,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         let moreRoot = NSMenuItem(title: "🔧 More", action: nil, keyEquivalent: "")
         let more = NSMenu()
+
+        // Multi-relay server picker (Auto Fastest or explicit relay)
+        let srvRoot = NSMenuItem(title: "🌍 Server", action: nil, keyEquivalent: "")
+        let srvMenu = NSMenu()
+        let cfg = loadRelayConfig()
+        let curSel = cfg?.selected ?? "auto"
+        let autoItem = NSMenuItem(title: "⚡ Auto (Fastest)", action: #selector(selectRelay(_:)), keyEquivalent: "")
+        autoItem.target = self
+        autoItem.representedObject = "auto"
+        autoItem.state = (curSel == "auto") ? .on : .off
+        srvMenu.addItem(autoItem)
+        if let relays = cfg?.relays, !relays.isEmpty {
+            srvMenu.addItem(.separator())
+            for r in relays {
+                let it = NSMenuItem(title: "\(r.name)  (\(r.server))", action: #selector(selectRelay(_:)), keyEquivalent: "")
+                it.target = self
+                it.representedObject = r.name
+                it.state = (curSel == r.name || curSel == r.server) ? .on : .off
+                srvMenu.addItem(it)
+            }
+        }
+        srvMenu.addItem(.separator())
+        let checkItem = NSMenuItem(title: "🔍 Check Server Speeds", action: #selector(checkRelays), keyEquivalent: "")
+        checkItem.target = self
+        srvMenu.addItem(checkItem)
+        srvRoot.submenu = srvMenu
+        more.addItem(srvRoot)
 
         let wifiItem = NSMenuItem(title: "📶 Join Another Wi-Fi…", action: #selector(joinAnotherWiFi), keyEquivalent: "w")
         wifiItem.target = self
@@ -386,7 +455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Core Actions
 
     @objc private func startBonding() {
-        busyText = "Starting…"
+        busyText = "Picking fastest server…"
         proofLines = []
         lastNote = nil
         render()
@@ -397,7 +466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard prep.code == 0 else {
                 DispatchQueue.main.async {
                     self.busyText = nil
-                    self.setNote("No internet connections found")
+                    self.setNote("No reachable server or internet — check relays.json")
                     self.render()
                 }
                 return
@@ -407,11 +476,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.clearMacOSSocksIfEnabled()
 
             let launchCmd = """
-            /usr/bin/python3 -c 'import subprocess; subprocess.Popen(["/bin/bash","-c","set -a; source /tmp/speedbond-launch.env; rm -f /tmp/speedbond-launch.env; exec \(self.baseDir)/speedbond client -server \\"$SPEEDBOND_SERVER\\" -links \\"$SPEEDBOND_LINKS\\" -pin \\"$SPEEDBOND_PIN\\""], stdin=subprocess.DEVNULL, stdout=open("/tmp/open-speedify-client.log","wb"), stderr=subprocess.STDOUT, start_new_session=True)'
+            /usr/bin/python3 -c 'import subprocess; subprocess.Popen(["/bin/bash","-c","set -a; source /tmp/speedbond-launch.env; rm -f /tmp/speedbond-launch.env; exec \(self.baseDir)/speedbond client -server \\"$SPEEDBOND_SERVER\\" -relay-name \\"$SPEEDBOND_RELAY_NAME\\" -links \\"$SPEEDBOND_LINKS\\" -pin \\"$SPEEDBOND_PIN\\""], stdin=subprocess.DEVNULL, stdout=open("/tmp/open-speedify-client.log","wb"), stderr=subprocess.STDOUT, start_new_session=True)'
             """
             let ok = self.runAdminShell(launchCmd)
             if ok.code == 0 {
-                // Wait briefly for control API to come up so UI transitions smoothly
                 for _ in 0..<14 {
                     if self.runShell("curl -sf --max-time 1 \(self.ctrlURL)/status >/dev/null").code == 0 {
                         break
@@ -437,14 +505,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         postControl("/stop") { [weak self] _ in
             guard let self = self else { return }
             DispatchQueue.global(qos: .userInitiated).async {
-                // Wait briefly for speedbond client to release port 19454
                 for _ in 0..<10 {
                     if self.runShell("nc -z 127.0.0.1 19454 2>/dev/null").code != 0 {
                         break
                     }
                     Thread.sleep(forTimeInterval: 0.2)
                 }
-                // Immediately restore Alfa as default if Alfa is ON
                 let mode = self.runShell("cat /tmp/alfa-mode 2>/dev/null || echo on").out.trimmingCharacters(in: .whitespacesAndNewlines)
                 if mode != "off" && FileManager.default.fileExists(atPath: "\(self.alfaDir)/monitor.sock") {
                     _ = self.runShell("\(self.alfaDir)/alfa.sh proxy on >/dev/null 2>&1 || true")
@@ -455,6 +521,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.lastNote = nil
                     self.poll()
                 }
+            }
+        }
+    }
+
+    @objc private func selectRelay(_ sender: NSMenuItem) {
+        guard let sel = sender.representedObject as? String else { return }
+        saveSelectedRelay(sel)
+        if currentStatus != nil {
+            setNote("Server → \(sel == "auto" ? "Auto (Fastest)" : sel). Turn OFF & ON to switch.")
+        } else {
+            setNote("Server → \(sel == "auto" ? "Auto (Fastest)" : sel)")
+        }
+        render()
+    }
+
+    @objc private func checkRelays() {
+        guard !benchRunning else { return }
+        benchRunning = true
+        proofLines = ["Checking all servers in relays.json…"]
+        render()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let res = self.runShell("\(self.baseDir)/speedbond pick")
+            let lines = res.out
+                .split(separator: "\n")
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            DispatchQueue.main.async {
+                self.benchRunning = false
+                self.proofLines = lines.isEmpty ? ["No servers configured in relays.json"] : lines
+                self.render()
             }
         }
     }

@@ -69,48 +69,69 @@ You can combine **as many internet sources as you have** simultaneously:
    - `TestRelaySharedSessionReassemblyAndBridge` — PASS
    - `TestSmoothWeightedRoundRobin` — PASS
 
-## Quick Start
+## Quick Start (100% Self-Hosted, Multi-Server)
 
-### 1. Build Binaries (macOS + Linux VPS + optional ARM64 VM bridge)
+Requires Go 1.24+ on your Mac and any **KVM Ubuntu/Debian VPS** (1 vCPU / 512 MB RAM is plenty — pick a datacenter close to your physical location for lowest ping!).
 
-Requires Go 1.24+:
+### 1. Deploy One or More VPS Relays (One Command)
+
+```bash
+git clone https://github.com/eminogrande/open-speedify.git
+cd open-speedify
+
+# Deploy onto any Ubuntu/Debian VPS (auto-detects amd64/arm64, generates TLS pin + token,
+# tunes UDP buffers, opens UDP 443, and saves to gitignored relays.json):
+./deploy-relay.sh root@YOUR_VPS_IP "🇩🇪 Germany"
+
+# Optional: add a 2nd/3rd VPS — Open Speedify automatically picks the fastest one!
+./deploy-relay.sh root@SECOND_VPS_IP "🇰🇪 Nairobi"
+```
+
+<details>
+<summary>Manual VPS setup (if you prefer installing without deploy-relay.sh)</summary>
+
+Build binaries (`GOOS=linux GOARCH=amd64 go build -o speedbond-linux .`), copy to `/usr/local/sbin/speedbond`, then on the VPS:
+```bash
+sudo mkdir -p /etc/speedbond
+sudo /usr/local/sbin/speedbond cert -cert /etc/speedbond/relay.crt -key /etc/speedbond/relay.key
+# Copy the printed SHA-256 pin
+echo "SPEEDBOND_TOKEN=$(openssl rand -hex 24)" | sudo tee /etc/speedbond/environment >/dev/null
+sudo chmod 600 /etc/speedbond/environment
+sudo cp speedbond-relay.service /etc/systemd/system/
+sudo systemctl enable --now speedbond-relay
+```
+Then copy `relays.example.json` to `relays.json` (`chmod 600 relays.json`, gitignored) and fill in your `server`, `pin`, and `token`.
+
+</details>
+
+### 2. Build Client Binaries & macOS Menu Bar App (`SpeedbondBar.app`)
+
 ```bash
 go test -count=1 -race ./...
 go build -o speedbond .
-GOOS=linux GOARCH=amd64 go build -o speedbond-linux .    # Ubuntu x86_64 VPS relay
-GOOS=linux GOARCH=arm64 go build -o speedbond-arm64 .    # ARM64 VM UDP bridge (e.g. Alfa VM)
-```
+GOOS=linux GOARCH=arm64 go build -o speedbond-arm64 .   # optional: for Alfa VM UDP bridge
 
-### 2. Deploy Relay on Your Linux VPS (Ubuntu)
+# Test all configured relays and pick the fastest:
+./speedbond pick
 
-Needs `/dev/net/tun`, `ip`, and `iptables`. Open UDP port `443` (or your chosen port):
-```bash
-sudo install -m 755 speedbond-linux /usr/local/sbin/speedbond
-sudo mkdir -p /etc/speedbond
-sudo /usr/local/sbin/speedbond cert -cert /etc/speedbond/relay.crt -key /etc/speedbond/relay.key
-# Save the printed SHA-256 certificate pin for your Mac client!
-```
-Create `/etc/speedbond/environment` with `SPEEDBOND_TOKEN=<random 32+ char secret>`, install [speedbond-relay.service](speedbond-relay.service), and start it:
-```bash
-sudo systemctl enable --now speedbond-relay
-```
-The relay automatically configures its TUN interface (`MTU=1150`), IPv4 forwarding, NAT masquerading, and TCP MSS clamping.
-
-### 3. macOS Menu Bar App (`SpeedbondBar.app`) — Recommended
-
-Build, launch, and install the login LaunchAgent in one step:
-```bash
+# Build, launch, and auto-start SpeedbondBar.app at login:
 ./build-speedbondbar.sh
 ```
+
 From the menu bar (`⚪ 🚀` → `🟡 🚀 1x` → `🟢 🚀 2x` / `3x` / `4x`):
-- **🟢 Turn ON (Combine All) / 🔴 Turn OFF (`⌘S`)** — single toggle; automatically detects & combines Alfa Antenna (`📡`), Mac Wi-Fi (`📶`), iPhone USB (`📱`), Android USB (`🤖`), and Ethernet (`🔌`), prunes unplugged USB links, auto-recovers tunnel IP after Mac sleep, and yields cleanly back to Alfa when turned OFF.
+- **🟢 Turn ON (Combine All) / 🔴 Turn OFF (`⌘S`)** — automatically picks your fastest healthy VPS from `relays.json`, combines Alfa Antenna (`📡`), Mac Wi-Fi (`📶`), iPhone USB (`📱`), Android USB (`🤖`), and Ethernet (`🔌`), prunes unplugged USB links, auto-recovers tunnel IP after Mac sleep, and hands cleanly back to Alfa on OFF.
 - **⚡ Speed Test (`⌘B`)** — solo vs. combined throughput proof right in the menu bar.
+- **🔧 More ▸ 🌍 Server ▸** — `⚡ Auto (Fastest)`, switch to any VPS in `relays.json`, or `🔍 Check Server Speeds`.
 - **🔧 More ▸** — `📶 Join Another Wi-Fi…`, per-link pause/resume, `🤖 Repair Android USB`, and `💻 Terminal Monitor (bond)`.
 
-### 4. Terminal Launcher, TUI (`bond`), and CLI
+> **Security:** Your `relays.json` is gitignored (`chmod 600`). Every relay rejects unauthenticated clients via pinned TLS + constant-time SHA-256 token verification (`SPEEDBOND_TOKEN`).
+
+### 3. Terminal Launcher, TUI (`bond`), and CLI
 
 ```bash
-./start-bond.sh                                          # Auto-detect all links & start client
+./speedbond pick                                         # Benchmark all relays in relays.json
+./start-bond.sh                                          # Auto-pick fastest relay + combine all links
+SPEEDBOND_RELAY="🇩🇪 Germany" ./start-bond.sh             # Pin a specific relay by name or host:port
 ./speedbond-tui.py                                       # Live terminal TUI (or symlink as `bond`)
 
 speedbond interfaces                                     # List active interfaces
@@ -122,7 +143,7 @@ speedbond bench -seconds 8 -streams 3                    # Solo vs. Bonded speed
 speedbond bridge -listen :4546 -target VPS:443 -iface wlx00c0caa826f5
 ```
 
-### 5. Optional Hardware Companions
+### 4. Optional Hardware Companions
 
 - **Alfa AWUS1900 Long-Range USB Wi-Fi on Apple Silicon Mac:** Set up with [eminogrande/alfa-awus1900-apple-silicon](https://github.com/eminogrande/alfa-awus1900-apple-silicon). `start-bond.sh` and `SpeedbondBar.app` automatically inject a live QEMU UDP port-forward (`127.0.0.1:4546`) and run `speedbond bridge` inside the Alfa VM bound directly to `wlx*`, with zero VM reboot and automatic sleep recovery.
 - **Android USB Tethering on macOS:** macOS lacks built-in RNDIS support; install user-space [`rndis-tether`](https://github.com/stlk0/rndis-tether):
