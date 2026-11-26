@@ -6,6 +6,7 @@ All notable changes to this project are documented here. Dates use ISO format.
 
 ### Added
 
+- **One-command build & simplified README (`build-speedbondbar.sh`, `README.md`):** `build-speedbondbar.sh` now builds `speedbond` and `speedbond-arm64` automatically before compiling and launching `SpeedbondBar.app`; trimmed `README.md` to a 2-command Quick Start at the top.
 - **LLM / Agent Playbook (`AGENTS.md`):** Drop-in guide for any AI coding agent to deploy and verify new VPS relays cleanly without touching app code or committing secrets.
 - **Smart `deploy-relay.sh`:** Automatically checks if UDP `:443` is already in use (e.g. Caddy/Nginx HTTP/3) and falls back to UDP `:4545`, resolves hostnames to IPv4 for sleep-proof reconnects, and supports `SSH_OPTS` for custom SSH keys/ports.
 

@@ -1,7 +1,12 @@
 #!/bin/bash
-# Build & launch SpeedbondBar.app (Open Speedify macOS menu bar controller) + login LaunchAgent.
+# One-command build & launch for Open Speedify:
+# Builds speedbond (macOS + ARM64 VM bridge), compiles SpeedbondBar.app, installs LaunchAgent, and launches it.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+echo "==> Building speedbond binaries..."
+go build -o speedbond .
+GOOS=linux GOARCH=arm64 go build -o speedbond-arm64 .
 
 pkill -x SpeedbondBar 2>/dev/null || true
 APP="SpeedbondBar.app"
@@ -14,14 +19,15 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleExecutable</key><string>SpeedbondBar</string>
   <key>CFBundleIdentifier</key><string>dev.open-speedify.SpeedbondBar</string>
   <key>CFBundleName</key><string>SpeedbondBar</string>
-  <key>CFBundleVersion</key><string>1.1</string>
+  <key>CFBundleVersion</key><string>1.2</string>
   <key>LSUIElement</key><true/>
 </dict>
 </plist>
 EOF
+
+echo "==> Building $APP..."
 swiftc -O -swift-version 5 -framework Cocoa -framework CoreWLAN SpeedbondBar.swift \
   -o "$APP/Contents/MacOS/SpeedbondBar"
-echo "built $PWD/$APP"
 
 PLIST="$HOME/Library/LaunchAgents/com.speedbondbar.plist"
 cat > "$PLIST" <<EOF
@@ -38,4 +44,4 @@ UID_NUM=$(id -u)
 launchctl bootout "gui/$UID_NUM/com.speedbondbar" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null || launchctl load "$PLIST"
 open -g "$PWD/$APP"
-echo "SpeedbondBar launched + LaunchAgent installed"
+echo "✅ Open Speedify ready (SpeedbondBar launched + LaunchAgent installed)"
