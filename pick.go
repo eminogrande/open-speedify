@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -107,14 +108,18 @@ func resolveRelayToken(r relayEntry) (string, error) {
 	return "", fmt.Errorf("no token configured for relay %q (set token, token_keychain, or SPEEDBOND_TOKEN)", r.Name)
 }
 
-func firstPhysicalInterface() (string, net.IP) {
+type physIface struct {
+	name string
+	ip   net.IP
+}
+
+func physicalInterfaces() []physIface {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return "", nil
+		return nil
 	}
-	// Prefer en0 (Mac Wi-Fi) if it has a routable IPv4, else first active physical interface.
-	var fallbackName string
-	var fallbackIP net.IP
+	var en0 []physIface
+	var others []physIface
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
@@ -131,14 +136,75 @@ func firstPhysicalInterface() (string, net.IP) {
 		if err != nil || ip.IsLinkLocalUnicast() {
 			continue
 		}
+		p := physIface{name: name, ip: ip}
 		if name == "en0" {
-			return name, ip
-		}
-		if fallbackName == "" {
-			fallbackName, fallbackIP = name, ip
+			en0 = append(en0, p)
+		} else {
+			others = append(others, p)
 		}
 	}
-	return fallbackName, fallbackIP
+	return append(en0, others...)
+}
+
+func dialProbeQUIC(ctx context.Context, remote *net.UDPAddr, tlsCfg *tls.Config, token string, iface *physIface, timeout time.Duration) (float64, error) {
+	var udp *net.UDPConn
+	var err error
+	if iface != nil {
+		udp, err = net.ListenUDP("udp4", &net.UDPAddr{IP: iface.ip, Port: 0})
+		if err != nil {
+			return 0, err
+		}
+		if raw, serr := udp.SyscallConn(); serr == nil {
+			var berr error
+			if cerr := raw.Control(func(fd uintptr) { berr = bindToInterface(fd, iface.name) }); cerr != nil || berr != nil {
+				udp.Close()
+				if cerr != nil {
+					return 0, cerr
+				}
+				return 0, berr
+			}
+		}
+	} else {
+		udp, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+		if err != nil {
+			return 0, err
+		}
+	}
+	defer udp.Close()
+
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	start := time.Now()
+	conn, err := quic.Dial(pctx, udp, remote, tlsCfg, quicConfig())
+	if err != nil {
+		return 0, err
+	}
+	defer conn.CloseWithError(0, "pick probe done")
+
+	stream, err := conn.OpenStreamSync(pctx)
+	if err != nil {
+		return 0, err
+	}
+	stream.SetDeadline(time.Now().Add(timeout))
+	session, err := newSession()
+	if err != nil {
+		return 0, err
+	}
+	h := hello{Session: session, Link: 0, Token: tokenHash(token)}
+	if err := h.writeTo(stream); err != nil {
+		return 0, err
+	}
+	if _, err := readHelloReply(stream); err != nil {
+		return 0, err
+	}
+	stream.Close()
+
+	rtt := conn.ConnectionStats().SmoothedRTT
+	if rtt <= 0 {
+		rtt = time.Since(start)
+	}
+	return float64(rtt) / float64(time.Millisecond), nil
 }
 
 func probeRelay(ctx context.Context, r relayEntry, timeout time.Duration) relayProbeResult {
@@ -167,70 +233,33 @@ func probeRelay(ctx context.Context, r relayEntry, timeout time.Duration) relayP
 		return res
 	}
 
-	var udp *net.UDPConn
+	var candidates []*physIface
 	if !remote.IP.IsLoopback() {
-		if ifName, localIP := firstPhysicalInterface(); ifName != "" {
-			if c, lerr := net.ListenUDP("udp4", &net.UDPAddr{IP: localIP, Port: 0}); lerr == nil {
-				if raw, serr := c.SyscallConn(); serr == nil {
-					var berr error
-					if cerr := raw.Control(func(fd uintptr) { berr = bindToInterface(fd, ifName) }); cerr == nil && berr == nil {
-						udp = c
-					}
-				}
-				if udp == nil {
-					c.Close()
-				}
-			}
+		for _, p := range physicalInterfaces() {
+			pc := p
+			candidates = append(candidates, &pc)
 		}
 	}
-	if udp == nil {
-		udp, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-		if err != nil {
-			res.Error = err.Error()
+	// Fallback to unbound socket (loopback tests or when all scoped binds lack route)
+	candidates = append(candidates, nil)
+
+	var lastErr error
+	for _, cand := range candidates {
+		rttMs, derr := dialProbeQUIC(ctx, remote, tlsCfg, token, cand, timeout)
+		if derr == nil {
+			res.OK = true
+			res.RTTMs = rttMs
 			return res
 		}
+		lastErr = derr
+		// Fast-fail on local route errors to try next physical interface; stop on timeout/auth errors if we already tried unbound
+		if cand == nil {
+			break
+		}
 	}
-	defer udp.Close()
-
-	pctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	start := time.Now()
-	conn, err := quic.Dial(pctx, udp, remote, tlsCfg, quicConfig())
-	if err != nil {
-		res.Error = err.Error()
-		return res
+	if lastErr != nil {
+		res.Error = lastErr.Error()
 	}
-	defer conn.CloseWithError(0, "pick probe done")
-
-	stream, err := conn.OpenStreamSync(pctx)
-	if err != nil {
-		res.Error = err.Error()
-		return res
-	}
-	stream.SetDeadline(time.Now().Add(timeout))
-	session, err := newSession()
-	if err != nil {
-		res.Error = err.Error()
-		return res
-	}
-	h := hello{Session: session, Link: 0, Token: tokenHash(token)}
-	if err := h.writeTo(stream); err != nil {
-		res.Error = err.Error()
-		return res
-	}
-	if _, err := readHelloReply(stream); err != nil {
-		res.Error = err.Error()
-		return res
-	}
-	stream.Close()
-
-	rtt := conn.ConnectionStats().SmoothedRTT
-	if rtt <= 0 {
-		rtt = time.Since(start)
-	}
-	res.OK = true
-	res.RTTMs = float64(rtt) / float64(time.Millisecond)
 	return res
 }
 

@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here. Dates use ISO format.
 
+## [0.5.1] - 2026-11-26
+
+### Added
+
+- **LLM / Agent Playbook (`AGENTS.md`):** Drop-in guide for any AI coding agent to deploy and verify new VPS relays cleanly without touching app code or committing secrets.
+- **Smart `deploy-relay.sh`:** Automatically checks if UDP `:443` is already in use (e.g. Caddy/Nginx HTTP/3) and falls back to UDP `:4545`, resolves hostnames to IPv4 for sleep-proof reconnects, and supports `SSH_OPTS` for custom SSH keys/ports.
+
+### Fixed
+
+- **`speedbond pick` while already bonded (`pick.go`):** Iterates through all active physical interfaces plus unbound fallback instead of stopping on an unscoped `en0` route error, so `speedbond pick` and `🔍 Check Server Speeds` accurately measure all relays even while `utun` is active.
+
 ## [0.5.0] - 2026-11-26
 
 ### Added

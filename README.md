@@ -87,6 +87,8 @@ cd open-speedify
 ./deploy-relay.sh root@SECOND_VPS_IP "🇰🇪 Nairobi"
 ```
 
+> **Using an AI coding agent?** Point your agent to [`AGENTS.md`](AGENTS.md) with any VPS IP — it handles deployment, port conflict checks (`443` vs `4545`), `relays.json` updates, and `./speedbond pick` verification without touching app code.
+
 <details>
 <summary>Manual VPS setup (if you prefer installing without deploy-relay.sh)</summary>
 
