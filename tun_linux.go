@@ -92,6 +92,21 @@ func configureClient(name string, ip net.IP) (func(), error) {
 	}, nil
 }
 
+func updateClientIP(name string, oldIP, newIP net.IP) error {
+	if err := run("ip", "addr", "replace", newIP.String()+"/16", "dev", name); err != nil {
+		return err
+	}
+	if oldIP != nil && !oldIP.Equal(newIP) {
+		exec.Command("ip", "addr", "del", oldIP.String()+"/16", "dev", name).Run()
+	}
+	for _, network := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		if err := run("ip", "route", "replace", network, "dev", name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func configureRelay(name string, port int) (func(), error) {
 	out, err := exec.Command("ip", "-o", "-4", "route", "show", "default").Output()
 	if err != nil {

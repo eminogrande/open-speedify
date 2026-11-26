@@ -98,19 +98,14 @@ The relay automatically configures its TUN interface (`MTU=1150`), IPv4 forwardi
 
 ### 3. macOS Menu Bar App (`SpeedbondBar.app`) — Recommended
 
-Build and launch the native autopilot menu bar app:
+Build, launch, and install the login LaunchAgent in one step:
 ```bash
-mkdir -p SpeedbondBar.app/Contents/MacOS
-swiftc -O -swift-version 5 -framework Cocoa -framework CoreWLAN SpeedbondBar.swift \
-  -o SpeedbondBar.app/Contents/MacOS/SpeedbondBar
-open SpeedbondBar.app
+./build-speedbondbar.sh
 ```
-From the menu bar (`⚪ Bond OFF` → `🟢 Combined 2x` / `3x` / `4x`):
-- **▶ Turn ON / ■ Turn OFF** — one click (Touch ID/password to start; instant no-password stop).
-- **Automatic Discovery & Self-Healing** — automatically detects & joins Mac Wi-Fi, Alfa Antenna, iPhone USB, Android USB, and Ethernet; auto-heals Alfa USB after Mac sleep; auto-refreshes routes when you switch Wi-Fi networks; and keeps macOS SOCKS5 proxy off while bonded so browsers use your VPS VPN IP.
-- **📶 Join Another Wi-Fi…** — scans nearby Wi-Fi networks and connects Mac Wi-Fi or Alfa Antenna to a 2nd Wi-Fi (asks for password only if not saved).
-- **⚡ Test Speed (Alone vs Combined)** — plain-English proof right in the menu bar.
-- **Advanced ▸** — tunnel details, manual pause/resume, custom link specs, Android USB repair, and terminal TUI (`bond`).
+From the menu bar (`⚪ 🚀` → `🟡 🚀 1x` → `🟢 🚀 2x` / `3x` / `4x`):
+- **🟢 Turn ON (Combine All) / 🔴 Turn OFF (`⌘S`)** — single toggle; automatically detects & combines Alfa Antenna (`📡`), Mac Wi-Fi (`📶`), iPhone USB (`📱`), Android USB (`🤖`), and Ethernet (`🔌`), prunes unplugged USB links, auto-recovers tunnel IP after Mac sleep, and yields cleanly back to Alfa when turned OFF.
+- **⚡ Speed Test (`⌘B`)** — solo vs. combined throughput proof right in the menu bar.
+- **🔧 More ▸** — `📶 Join Another Wi-Fi…`, per-link pause/resume, `🤖 Repair Android USB`, and `💻 Terminal Monitor (bond)`.
 
 ### 4. Terminal Launcher, TUI (`bond`), and CLI
 

@@ -10,50 +10,67 @@ ALFA_SOCK="$ALFA_DIR/monitor.sock"
 ALFA_PORT=4546
 LOG=/tmp/open-speedify-client.log
 
-setup_alfa_bridge() {
-  [[ -S "$ALFA_SOCK" && -f "$ALFA_KEY" ]] || return 1
-  local ssh_opts=(-q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -p 2222 -i "$ALFA_KEY")
-  local wlx
-  wlx="$(ssh "${ssh_opts[@]}" alfa@127.0.0.1 'ip -4 -o addr show | awk "/wlx/{print \$2; exit}"' 2>/dev/null || true)"
-  # Auto-heal Alfa Wi-Fi DHCP after Mac sleep if dongle is present without an IPv4 address
-  if [[ -z "$wlx" ]] && ioreg -p IOUSB -w0 2>/dev/null | grep -q '802\.11ac'; then
-    local saved_ssid="" saved_pass=""
-    if [[ -f "$ALFA_DIR/wifi.env" ]]; then
-      # shellcheck disable=SC1090
-      source "$ALFA_DIR/wifi.env" 2>/dev/null || true
-      saved_ssid="${SSID:-}"
-      saved_pass="${PASS:-}"
-    fi
-    if [[ -n "$saved_ssid" ]]; then
-      "$ALFA_DIR/alfa.sh" wifi "$saved_ssid" "$saved_pass" >/dev/null 2>&1 || {
-        "$ALFA_DIR/alfa.sh" usb-off >/dev/null 2>&1 || true
-        sleep 1
-        "$ALFA_DIR/alfa.sh" usb-on >/dev/null 2>&1 || true
-        sleep 2
-        "$ALFA_DIR/alfa.sh" wifi "$saved_ssid" "$saved_pass" >/dev/null 2>&1 || true
-      }
-      wlx="$(ssh "${ssh_opts[@]}" alfa@127.0.0.1 'ip -4 -o addr show | awk "/wlx/{print \$2; exit}"' 2>/dev/null || true)"
-    fi
+SSH_OPTS=(
+  -q -o BatchMode=yes
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=3
+  -o IdentitiesOnly=yes
+  -o PreferredAuthentications=publickey
+  -o PasswordAuthentication=no
+  -p 2222 -i "$ALFA_KEY"
+)
+SCP_OPTS=(
+  -q -o BatchMode=yes
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=3
+  -o IdentitiesOnly=yes
+  -o PreferredAuthentications=publickey
+  -o PasswordAuthentication=no
+  -P 2222 -i "$ALFA_KEY"
+)
+
+clear_macos_socks() {
+  local svc
+  while IFS= read -r svc; do
+    [[ -n "$svc" ]] && networksetup -setsocksfirewallproxystate "$svc" off 2>/dev/null || true
+  done < <(networksetup -listnetworkserviceorder 2>/dev/null | awk '
+    /^\([0-9]+\) / { name=$0; sub(/^\([0-9]+\) /, "", name); next }
+    /\(Hardware Port:.*Device: en[0-9]+\)/ && name != "" { print name; name="" }
+  ')
+}
+
+restore_alfa_if_on() {
+  local mode
+  mode="$(cat /tmp/alfa-mode 2>/dev/null || echo on)"
+  if [[ "$mode" != "off" ]] && [[ -x "$ALFA_DIR/alfa.sh" ]] && [[ -S "$ALFA_SOCK" ]]; then
+    "$ALFA_DIR/alfa.sh" proxy on >/dev/null 2>&1 || true
   fi
-  [[ -n "$wlx" ]] || return 1
+}
 
-  # Deploy arm64 binary into VM if missing or outdated (atomic mv avoids ETXTBSY)
-  if ! ssh "${ssh_opts[@]}" alfa@127.0.0.1 'test -x ~/speedbond-bridge' 2>/dev/null || \
-     [[ "$(stat -f%m ./speedbond-arm64)" -gt "$(ssh "${ssh_opts[@]}" alfa@127.0.0.1 'stat -c%Y ~/speedbond-bridge 2>/dev/null || echo 0')" ]]; then
-    scp -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P 2222 -i "$ALFA_KEY" \
-      ./speedbond-arm64 alfa@127.0.0.1:~/speedbond-bridge.new
-    ssh "${ssh_opts[@]}" alfa@127.0.0.1 'chmod +x ~/speedbond-bridge.new && mv -f ~/speedbond-bridge.new ~/speedbond-bridge'
-  fi
+qemu_has_udp_fwd() {
+  python3 - "$ALFA_SOCK" "$ALFA_PORT" <<'PY'
+import socket, sys, time
+sock_path, port = sys.argv[1], sys.argv[2]
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2)
+    s.connect(sock_path)
+    time.sleep(0.08)
+    try: s.recv(4096)
+    except Exception: pass
+    s.sendall(b"info usernet\n")
+    time.sleep(0.15)
+    out = s.recv(16384).decode(errors="ignore")
+    s.close()
+    sys.exit(0 if ("UDP[HOST_FORWARD]" in out and f" {port} " in out) else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
 
-  # Start UDP bridge inside Alfa VM bound directly to wlx interface
-  ssh "${ssh_opts[@]}" alfa@127.0.0.1 "
-    sudo pkill -f '[s]peedbond-bridge bridge' 2>/dev/null || true
-    sudo rm -f /tmp/speedbond-bridge.log
-    sleep 0.2
-    sudo python3 -c 'import subprocess; subprocess.Popen([\"/home/alfa/speedbond-bridge\",\"bridge\",\"-listen\",\":$ALFA_PORT\",\"-target\",\"$RELAY\",\"-iface\",\"$wlx\"], stdin=subprocess.DEVNULL, stdout=open(\"/var/log/speedbond-bridge.log\",\"wb\"), stderr=subprocess.STDOUT, start_new_session=True)'
-  "
-
-  # Add live QEMU UDP hostfwd without rebooting VM
+qemu_set_udp_fwd() {
   python3 - "$ALFA_SOCK" "$ALFA_PORT" <<'PY'
 import socket, sys, time
 sock_path, port = sys.argv[1], sys.argv[2]
@@ -73,9 +90,77 @@ try: s.recv(4096)
 except Exception: pass
 s.close()
 PY
+}
+
+setup_alfa_bridge() {
+  local force="${1:-0}"
+  [[ -S "$ALFA_SOCK" && -f "$ALFA_KEY" ]] || return 1
+  # Verify SSH reachability first so auth/timeout failures never trigger USB resets.
+  ssh "${SSH_OPTS[@]}" alfa@127.0.0.1 true 2>/dev/null || return 1
+
+  local wlx
+  wlx="$(ssh "${SSH_OPTS[@]}" alfa@127.0.0.1 'ip -4 -o addr show | awk "/wlx/{print \$2; exit}"' 2>/dev/null || true)"
+  # Auto-heal Alfa Wi-Fi DHCP after Mac sleep if dongle is present without an IPv4 address
+  if [[ -z "$wlx" ]] && ioreg -p IOUSB -w0 2>/dev/null | grep -q '802\.11ac'; then
+    local saved_ssid="" saved_pass=""
+    if [[ -f "$ALFA_DIR/wifi.env" ]]; then
+      # shellcheck disable=SC1090
+      source "$ALFA_DIR/wifi.env" 2>/dev/null || true
+      saved_ssid="${SSID:-}"
+      saved_pass="${PASS:-}"
+    fi
+    if [[ -n "$saved_ssid" ]]; then
+      "$ALFA_DIR/alfa.sh" wifi "$saved_ssid" "$saved_pass" >/dev/null 2>&1 || {
+        "$ALFA_DIR/alfa.sh" usb-off >/dev/null 2>&1 || true
+        sleep 1
+        "$ALFA_DIR/alfa.sh" usb-on >/dev/null 2>&1 || true
+        sleep 2
+        "$ALFA_DIR/alfa.sh" wifi "$saved_ssid" "$saved_pass" >/dev/null 2>&1 || true
+      }
+      wlx="$(ssh "${SSH_OPTS[@]}" alfa@127.0.0.1 'ip -4 -o addr show | awk "/wlx/{print \$2; exit}"' 2>/dev/null || true)"
+    fi
+  fi
+  [[ -n "$wlx" ]] || return 1
+
+  local need_restart="$force"
+  # Deploy arm64 binary into VM if missing or outdated (atomic mv avoids ETXTBSY)
+  if ! ssh "${SSH_OPTS[@]}" alfa@127.0.0.1 'test -x ~/speedbond-bridge' 2>/dev/null || \
+     [[ "$(stat -f%m ./speedbond-arm64)" -gt "$(ssh "${SSH_OPTS[@]}" alfa@127.0.0.1 'stat -c%Y ~/speedbond-bridge 2>/dev/null || echo 0')" ]]; then
+    scp "${SCP_OPTS[@]}" ./speedbond-arm64 alfa@127.0.0.1:~/speedbond-bridge.new
+    ssh "${SSH_OPTS[@]}" alfa@127.0.0.1 'chmod +x ~/speedbond-bridge.new && mv -f ~/speedbond-bridge.new ~/speedbond-bridge'
+    need_restart=1
+  fi
+
+  # Check if bridge is already running for this exact wlx interface
+  if [[ "$need_restart" -eq 0 ]]; then
+    if ! ssh "${SSH_OPTS[@]}" alfa@127.0.0.1 "pgrep -f 'speedbond-bridge bridge.*-iface $wlx' >/dev/null 2>&1"; then
+      need_restart=1
+    fi
+  fi
+
+  if [[ "$need_restart" -eq 1 ]]; then
+    ssh "${SSH_OPTS[@]}" alfa@127.0.0.1 "
+      sudo pkill -f '[s]peedbond-bridge bridge' 2>/dev/null || true
+      sudo rm -f /tmp/speedbond-bridge.log
+      sleep 0.2
+      sudo python3 -c 'import subprocess; subprocess.Popen([\"/home/alfa/speedbond-bridge\",\"bridge\",\"-listen\",\":$ALFA_PORT\",\"-target\",\"$RELAY\",\"-iface\",\"$wlx\"], stdin=subprocess.DEVNULL, stdout=open(\"/var/log/speedbond-bridge.log\",\"wb\"), stderr=subprocess.STDOUT, start_new_session=True)'
+    "
+  fi
+
+  if [[ "$need_restart" -eq 1 ]] || ! qemu_has_udp_fwd; then
+    qemu_set_udp_fwd
+  fi
+
   echo "Alfa UDP bridge ready on 127.0.0.1:$ALFA_PORT -> $wlx -> $RELAY" >&2
   return 0
 }
+
+if [[ "${1:-}" == "--setup-alfa" ]]; then
+  force=0
+  [[ "${2:-}" == "--force" ]] && force=1
+  setup_alfa_bridge "$force"
+  exit $?
+fi
 
 PREPARE_ONLY=0
 if [[ "${1:-}" == "--prepare" ]]; then
@@ -88,18 +173,18 @@ if [[ $# -gt 0 ]]; then
   IFS=',' read -r -a links <<< "$1"
   for item in "${links[@]}"; do
     if [[ "$item" == alfa=* ]]; then
-      setup_alfa_bridge || { echo "Alfa VM bridge setup failed"; exit 1; }
+      setup_alfa_bridge 0 || { echo "Alfa VM bridge setup failed"; exit 1; }
     fi
   done
 else
-  if setup_alfa_bridge; then
+  if setup_alfa_bridge 0; then
     links+=("alfa=127.0.0.1:$ALFA_PORT")
   fi
-  # Auto-detect ALL active physical IPv4 interfaces (skip link-local 169.254.x.x)
+  # Auto-detect ALL active physical IPv4 interfaces (skip link-local 169.254.x.x & virtuals)
   while IFS= read -r dev; do
     [[ -n "$dev" ]] && links+=("$dev")
   done < <(./speedbond interfaces | awk '
-    $2 !~ /^(utun|awdl|llw|bridge|ap|lo)/ && $0 ~ /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\// && $0 !~ /169\.254\./ { print $2 }
+    $2 !~ /^(utun|awdl|llw|bridge|ap|lo|anpi|anri)/ && $0 ~ /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\// && $0 !~ /169\.254\./ { print $2 }
   ')
 fi
 
@@ -124,14 +209,8 @@ if [[ "$PREPARE_ONLY" -eq 1 ]]; then
 fi
 export SPEEDBOND_TOKEN="$(security find-generic-password -a "$USER" -s open-speedify-relay-token -w)"
 
-# Pause alfa-autoswitch + disable macOS SOCKS5 during bonded session so browsers use the VPN tunnel
-SOCKS_WAS_ON=0
-ALFA_PREV_MODE="$(cat /tmp/alfa-mode 2>/dev/null || true)"
-if [[ "$ALFA_PREV_MODE" != "off" ]] || networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null | grep -q "Enabled: Yes"; then
-  SOCKS_WAS_ON=1
-  echo off > /tmp/alfa-mode 2>/dev/null || true
-  networksetup -setsocksfirewallproxystate Wi-Fi off 2>/dev/null || true
-fi
+# Clear macOS SOCKS5 proxy while bonded so browsers use the combined VPN (never touch /tmp/alfa-mode)
+clear_macos_socks
 
 : >"$LOG"
 app=""
@@ -146,10 +225,7 @@ cleanup() {
       sudo kill -KILL "$app" 2>/dev/null || true
     fi
   fi
-  if [[ "$SOCKS_WAS_ON" -eq 1 ]]; then
-    [[ -n "$ALFA_PREV_MODE" ]] && echo "$ALFA_PREV_MODE" > /tmp/alfa-mode 2>/dev/null || true
-    networksetup -setsocksfirewallproxystate Wi-Fi on 2>/dev/null || true
-  fi
+  restore_alfa_if_on
 }
 trap cleanup EXIT
 

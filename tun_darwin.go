@@ -154,6 +154,26 @@ func configureClient(name string, ip net.IP) (func(), error) {
 	return func() { cleanupClient(name, added) }, nil
 }
 
+// updateClientIP updates the utun IPv4 address after sleep/relay session expiry
+// so outbound packets match the newly assigned relay session IP instead of being dropped.
+func updateClientIP(name string, oldIP, newIP net.IP) error {
+	if oldIP != nil && !oldIP.Equal(newIP) {
+		exec.Command("ifconfig", name, "inet", oldIP.String(), "delete").Run()
+	}
+	if err := run("ifconfig", name, "inet", newIP.String(), "10.77.0.1", "netmask", "255.255.0.0", "mtu", fmt.Sprint(tunnelMTU), "up"); err != nil {
+		return err
+	}
+	for _, network := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		exec.Command("route", "-n", "delete", "-net", network, "-interface", name).Run()
+		if err := run("route", "-n", "add", "-net", network, "-interface", name); err != nil {
+			if !strings.Contains(err.Error(), "File exists") {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func cleanupClient(name string, routes int) {
 	networks := []string{"0.0.0.0/1", "128.0.0.0/1"}
 	for i := routes - 1; i >= 0; i-- {

@@ -244,6 +244,24 @@ func TestSmoothWeightedRoundRobin(t *testing.T) {
 	}
 }
 
+func TestClientSyncTunnelIP(t *testing.T) {
+	mgr := &clientManager{
+		tunName:  "utun99",
+		tunnelIP: net.IPv4(10, 77, 0, 29),
+		route:    false,
+	}
+	// Same IP is a no-op
+	mgr.syncTunnelIP(net.IPv4(10, 77, 0, 29))
+	if !mgr.tunnelIP.Equal(net.IPv4(10, 77, 0, 29)) {
+		t.Fatalf("unexpected ip: %v", mgr.tunnelIP)
+	}
+	// New IP after relay session expiry updates tunnelIP
+	mgr.syncTunnelIP(net.IPv4(10, 77, 0, 42))
+	if !mgr.tunnelIP.Equal(net.IPv4(10, 77, 0, 42)) {
+		t.Fatalf("expected updated ip 10.77.0.42, got %v", mgr.tunnelIP)
+	}
+}
+
 func ipv4TestPacket(srcIP net.IP, seq uint64) []byte {
 	pkt := make([]byte, 28)
 	pkt[0] = 0x45 // IPv4, IHL=5

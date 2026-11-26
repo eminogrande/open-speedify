@@ -456,11 +456,13 @@ func (m *clientManager) manageLink(ctx context.Context, ml *managedLink) {
 		ml.lastErr = ""
 		ml.mu.Unlock()
 
+		m.syncTunnelIP(ip)
+
 		select {
 		case m.ready <- ip:
 		default:
 		}
-		log.Printf("link=%s connected rtt=%s", ml.spec.Name, link.conn.ConnectionStats().SmoothedRTT)
+		log.Printf("link=%s connected ip=%s rtt=%s", ml.spec.Name, ip, link.conn.ConnectionStats().SmoothedRTT)
 		err = receiveDatagrams(link.conn, m.reassembler, &link.received, &link.receivedBytes)
 
 		m.pool.remove(ml.id, link.conn)
@@ -491,6 +493,29 @@ func (m *clientManager) manageLink(ctx context.Context, ml *managedLink) {
 		log.Printf("link=%s disconnected: %v; reconnecting", ml.spec.Name, err)
 		if !sleepOrWake(ctx, 500*time.Millisecond, ml.wake) {
 			return
+		}
+	}
+}
+
+func (m *clientManager) syncTunnelIP(ip net.IP) {
+	if ip == nil {
+		return
+	}
+	m.mu.Lock()
+	oldIP := m.tunnelIP
+	if oldIP == nil || oldIP.Equal(ip) {
+		m.mu.Unlock()
+		return
+	}
+	tunName := m.tunName
+	doRoute := m.route
+	m.tunnelIP = ip
+	m.mu.Unlock()
+
+	log.Printf("tunnel IP changed %s -> %s (session refreshed); updating %s", oldIP, ip, tunName)
+	if doRoute {
+		if err := updateClientIP(tunName, oldIP, ip); err != nil {
+			log.Printf("warning: failed updating tunnel IP on %s: %v", tunName, err)
 		}
 	}
 }

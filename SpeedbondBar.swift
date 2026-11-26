@@ -57,19 +57,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var tickCount = 0
 
     private var currentStatus: ClientStatus?
-    private var socksDisabledByUs = false
     private var busyText: String?
     private var proofLines: [String] = []
     private var benchRunning = false
     private var lastNote: String?
+    private var lastNoteTime: Date = .distantPast
     private var autopilotBusy = false
+    private var lastAlfaTry: Date = .distantPast
     private var lastAlfaHeal: Date = .distantPast
     private var lastPhoneHeal: Date = .distantPast
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.menu = menu
-        updateTitle("⚪ Bond …")
+        updateTitle("⚪ 🚀")
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             self?.poll()
@@ -82,18 +83,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Friendly Human Labels
+    private func setNote(_ text: String?) {
+        lastNote = text
+        lastNoteTime = Date()
+    }
 
-    private func friendlyName(_ name: String) -> String {
+    // MARK: - Friendly Emoji Labels
+
+    private func friendlyLabel(_ name: String) -> String {
         switch name {
-        case "en0": return "Mac Wi-Fi"
-        case "alfa": return "Alfa Antenna"
-        case "feth50": return "Android Phone (USB)"
+        case "en0": return "📶 Mac Wi-Fi"
+        case "alfa": return "📡 Alfa Antenna"
+        case "feth50": return "🤖 Android (USB)"
         default:
             if name.hasPrefix("en"), let num = Int(name.dropFirst(2)) {
-                return num >= 7 ? "iPhone (USB)" : "USB Ethernet (\(name))"
+                return num >= 7 ? "📱 iPhone (USB)" : "🔌 Ethernet (\(name))"
             }
-            return name
+            return "🌐 \(name)"
         }
     }
 
@@ -109,37 +115,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if raw.hasPrefix("SOLO ") {
             let parts = raw.split(whereSeparator: { $0.isWhitespace }).map(String.init)
             if parts.count >= 4 {
-                let name = friendlyName(parts[1])
-                if raw.contains("err:") {
-                    return "\(name) alone: no internet"
-                }
-                return "\(name) alone: \(parts[2]) Mbps"
+                let name = friendlyLabel(parts[1])
+                return raw.contains("err:") ? "\(name): no internet" : "\(name): \(parts[2]) Mbps"
             }
         }
         if raw.hasPrefix("BONDED ") {
             let parts = raw.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-            if parts.count >= 4 {
-                return "Combined: \(parts[2]) Mbps"
-            }
+            if parts.count >= 4 { return "🚀 Combined: \(parts[2]) Mbps" }
         }
         if raw.hasPrefix("PROOF:") {
             if let open = raw.firstIndex(of: "("), let close = raw.firstIndex(of: ")") {
-                let detail = String(raw[raw.index(after: open)..<close])
-                return "✅ Result: \(detail)"
+                return "✅ \(raw[raw.index(after: open)..<close])"
             }
             return "✅ \(raw.replacingOccurrences(of: "PROOF: ", with: ""))"
-        }
-        if raw.contains("failed:") {
-            return "Test couldn't finish — check that internet is working"
         }
         return raw
     }
 
-    // MARK: - Polling + Self-Healing Autopilot
+    // MARK: - Polling + Automatic Link Discovery
 
     private func poll() {
         tickCount += 1
-        let runAutopilot = (tickCount == 2 || tickCount % 10 == 0)
+        let runAutopilot = (tickCount == 1 || tickCount % 4 == 0)
 
         let url = URL(string: ctrlURL + "/status")!
         let req = URLRequest(url: url, timeoutInterval: 1.0)
@@ -151,6 +148,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async {
                 self.currentStatus = decoded
+                if self.lastNote != nil && Date().timeIntervalSince(self.lastNoteTime) > 12 {
+                    self.lastNote = nil
+                }
                 self.render()
             }
             if runAutopilot, let st = decoded, !self.benchRunning {
@@ -159,10 +159,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }.resume()
     }
 
-    /// Fully automatic background discovery & self-healing:
-    /// - Keeps macOS SOCKS5 proxy OFF while bonded so browsers always use VPN
-    /// - Auto-joins any newly plugged phone, Ethernet, or Wi-Fi interface
-    /// - Auto-heals Android USB tether (rndis-tether) & Alfa USB antenna after Mac sleep
+    /// Fully automatic discovery while Open Speedify is ON:
+    /// - Keeps macOS system SOCKS5 proxy OFF while bonded (never modifies /tmp/alfa-mode)
+    /// - Auto-adds EVERY active physical IPv4 interface (Wi-Fi, iPhone, Android, Ethernet)
+    /// - Auto-bridges and hot-adds Alfa Antenna whenever plugged in & VM is up
+    /// - Auto-prunes unplugged USB interfaces so link list stays clean
     private func autopilotCheck(status st: ClientStatus) {
         guard !autopilotBusy else { return }
         autopilotBusy = true
@@ -170,131 +171,140 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer { self?.autopilotBusy = false }
             guard let self = self else { return }
 
-            // 1. Prevent alfa-autoswitch from hijacking Chrome back to local SOCKS5
-            if self.detectSocksProxy() {
-                _ = self.runShell("echo off > /tmp/alfa-mode; networksetup -setsocksfirewallproxystate Wi-Fi off")
-            }
+            // 1. Keep system SOCKS5 off while bonded (without modifying /tmp/alfa-mode)
+            self.clearMacOSSocksIfEnabled()
 
             let existing = Dictionary(uniqueKeysWithValues: st.links.map { ($0.name, $0) })
 
-            // 2. Auto-connect Android USB tether if Samsung/Android plugged in but feth50 offline
+            // 2. Auto-connect Android USB tether if Samsung/Android plugged in without feth50 IP
             let hasAndroidUSB = self.runShell("ioreg -p IOUSB -w0 2>/dev/null | grep -qiE 'SAMSUNG_Android|Android'").code == 0
             if hasAndroidUSB && self.runShell("ipconfig getifaddr feth50").out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if Date().timeIntervalSince(self.lastPhoneHeal) > 30 {
+                if Date().timeIntervalSince(self.lastPhoneHeal) > 25 {
                     self.lastPhoneHeal = Date()
                     _ = self.runShell("rndis-tether connect 2>/dev/null || true")
                 }
             }
 
-            // 3. Auto-join ANY active physical IPv4 interface (skip link-local 169.254.x.x)
-            let ifacesOut = self.runShell("\(self.baseDir)/speedbond interfaces | awk '$2 !~ /^(utun|awdl|llw|bridge|ap|lo)/ && $0 ~ /[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\\// && $0 !~ /169\\.254\\./ { print $2 }'").out
+            // 3. Discover ALL active physical IPv4 interfaces (skip link-local 169.254.x.x & virtuals)
+            let ifacesOut = self.runShell("\(self.baseDir)/speedbond interfaces | awk '$2 !~ /^(utun|awdl|llw|bridge|ap|lo|anpi|anri)/ && $0 ~ /[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\\// && $0 !~ /169\\.254\\./ { print $2 }'").out
+            var liveIfaces = Set<String>()
             for line in ifacesOut.split(separator: "\n") {
                 let dev = String(line).trimmingCharacters(in: .whitespaces)
-                if !dev.isEmpty && existing[dev] == nil {
-                    self.postControlSync("/links/add?spec=\(dev)")
-                    DispatchQueue.main.async {
-                        self.lastNote = "Auto-connected \(self.friendlyName(dev))"
+                if !dev.isEmpty { liveIfaces.insert(dev) }
+            }
+
+            for dev in liveIfaces.sorted() where existing[dev] == nil {
+                self.postControlSync("/links/add?spec=\(dev)")
+                DispatchQueue.main.async {
+                    self.setNote("Added \(self.friendlyLabel(dev))")
+                }
+            }
+
+            // Prune unplugged physical USB interfaces that disappeared and are DOWN
+            for link in st.links where link.interface != nil && link.name != "en0" {
+                if !link.paused && link.state != "UP" && !liveIfaces.contains(link.name) {
+                    let exists = self.runShell("ifconfig \(link.name) >/dev/null 2>&1").code == 0
+                    if !exists {
+                        self.postControlSync("/links/remove?name=\(link.name)")
                     }
                 }
             }
 
-            // 4. Auto-heal & auto-join Alfa USB antenna if plugged in and Alfa VM is running
+            // 4. Auto-join & auto-heal Alfa USB Antenna whenever plugged in & VM is running
             let hasAlfaUSB = self.runShell("ioreg -p IOUSB -w0 2>/dev/null | grep -q '802\\.11ac'").code == 0
             let hasAlfaVM = FileManager.default.fileExists(atPath: "\(self.alfaDir)/monitor.sock")
+            let alfaLink = existing["alfa"]
+
             if hasAlfaUSB && hasAlfaVM {
-                let alfaLink = existing["alfa"]
-                let alfaNeedsHeal = (alfaLink == nil) || (alfaLink!.state != "UP" && !alfaLink!.paused)
-                if alfaNeedsHeal && Date().timeIntervalSince(self.lastAlfaHeal) > 45 {
-                    self.lastAlfaHeal = Date()
-                    // Re-establish Alfa DHCP + UDP bridge using saved credentials
-                    let prep = self.runShell("\(self.baseDir)/start-bond.sh --prepare 'alfa=127.0.0.1:4546'")
-                    if prep.code == 0 && alfaLink == nil {
-                        self.postControlSync("/links/add?spec=alfa=127.0.0.1:4546")
-                        DispatchQueue.main.async {
-                            self.lastNote = "Auto-connected Alfa Antenna"
+                if alfaLink == nil {
+                    if Date().timeIntervalSince(self.lastAlfaTry) > 8 {
+                        self.lastAlfaTry = Date()
+                        let prep = self.runShell("\(self.baseDir)/start-bond.sh --setup-alfa")
+                        if prep.code == 0 {
+                            self.postControlSync("/links/add?spec=alfa=127.0.0.1:4546")
+                            DispatchQueue.main.async {
+                                self.setNote("Added 📡 Alfa Antenna")
+                            }
                         }
                     }
+                } else if alfaLink!.state != "UP" && !alfaLink!.paused {
+                    if Date().timeIntervalSince(self.lastAlfaHeal) > 20 {
+                        self.lastAlfaHeal = Date()
+                        _ = self.runShell("\(self.baseDir)/start-bond.sh --setup-alfa --force")
+                    }
                 }
+            } else if let al = alfaLink, al.state != "UP" && !al.paused {
+                // Alfa unplugged or turned off -> remove stale link
+                self.postControlSync("/links/remove?name=alfa")
             }
         }
     }
 
-    // MARK: - Clean Non-Technical UI
+    // MARK: - Minimal Emoji-First UI
 
     private func render() {
-        if let busy = busyText {
-            updateTitle("⏳ \(busy)")
+        if busyText != nil {
+            updateTitle("⏳ 🚀")
         } else if benchRunning {
-            updateTitle("⚡ Testing…")
+            updateTitle("⚡ 🚀 …")
         } else if let st = currentStatus {
             let speed = st.total_rx_mbps + st.total_tx_mbps
             if st.active_links >= 2 {
-                updateTitle(speed >= 0.3
-                    ? String(format: "🟢 %dx ↓%.1fM", st.active_links, st.total_rx_mbps)
-                    : "🟢 Combined \(st.active_links)x")
+                updateTitle(speed >= 0.5
+                    ? String(format: "🟢 🚀 %dx ↓%.1fM", st.active_links, st.total_rx_mbps)
+                    : "🟢 🚀 \(st.active_links)x")
             } else if st.active_links == 1 {
-                updateTitle(speed >= 0.3
-                    ? String(format: "🟡 1x ↓%.1fM", st.total_rx_mbps)
-                    : "🟡 1 Connection")
+                updateTitle(speed >= 0.5
+                    ? String(format: "🟡 🚀 1x ↓%.1fM", st.total_rx_mbps)
+                    : "🟡 🚀 1x")
             } else {
-                updateTitle("🔴 Connecting…")
+                updateTitle("🔴 🚀 …")
             }
         } else {
-            updateTitle("⚪ Bond OFF")
+            updateTitle("⚪ 🚀")
         }
 
         menu.removeAllItems()
 
-        if let st = currentStatus {
+        if let busy = busyText {
+            addLabel("⏳ \(busy)", bold: true)
+        } else if let st = currentStatus {
             if st.active_links >= 2 {
-                addLabel("🟢 Combined · \(st.active_links) connections working together", bold: true)
+                addLabel("🟢 Combined · \(st.active_links) connections", bold: true)
             } else if st.active_links == 1 {
-                addLabel("🟡 Connected · 1 connection active", bold: true)
-                addLabel("   Plug in a phone or join a 2nd Wi-Fi to combine speeds", dim: true)
+                addLabel("🟡 Active · 1 connection", bold: true)
             } else {
                 addLabel("🔴 Reconnecting…", bold: true)
             }
-            addLabel(String(format: "   ↓ %.1f Mbps  ↑ %.1f Mbps   ·   VPN: Germany 🇩🇪",
-                            st.total_rx_mbps, st.total_tx_mbps))
-
-            menu.addItem(.separator())
-            addLabel("CONNECTIONS (automatic)", bold: true)
+            addLabel(String(format: "   ↓ %.1f Mbps  ↑ %.1f Mbps  ·  🇩🇪 VPN",
+                            st.total_rx_mbps, st.total_tx_mbps), dim: true)
 
             for link in st.links {
-                let name = friendlyName(link.name)
+                let label = friendlyLabel(link.name)
                 if link.state == "UP" {
                     let q = qualityLabel(link)
-                    let spd = (link.rx_mbps + link.tx_mbps) >= 0.1
-                        ? String(format: " · ↓%.1fM ↑%.1fM", link.rx_mbps, link.tx_mbps)
+                    let spd = (link.rx_mbps + link.tx_mbps) >= 0.2
+                        ? String(format: " · ↓%.1fM", link.rx_mbps)
                         : ""
-                    addLabel("   🟢 \(name)   (\(q)\(spd))")
+                    addLabel("   🟢 \(label) · \(q)\(spd)")
                 } else if link.paused {
-                    addLabel("   ⏸ \(name)   (paused)", dim: true)
+                    addLabel("   ⏸ \(label) · paused", dim: true)
                 } else {
-                    let hint: String
-                    if link.name == "feth50" {
-                        hint = "waiting for Android data…"
-                    } else if friendlyName(link.name) == "iPhone (USB)" {
-                        hint = "turn on Personal Hotspot on iPhone"
-                    } else {
-                        hint = "connecting…"
-                    }
-                    addLabel("   🟡 \(name)   (\(hint))", dim: true)
+                    addLabel("   🟡 \(label) · connecting…", dim: true)
                 }
             }
         } else {
-            addLabel("⚪ Internet Bonding is OFF", bold: true)
-            addLabel("   Click Turn ON to combine Wi-Fi, Alfa & phones automatically", dim: true)
+            addLabel("⚪ Open Speedify OFF", bold: true)
+            addLabel("   Combines Alfa, Wi-Fi & phones automatically", dim: true)
         }
 
         if let note = lastNote {
-            menu.addItem(.separator())
-            addLabel("ℹ️ \(note)", dim: true)
+            addLabel("   ℹ️ \(note)", dim: true)
         }
 
         if !proofLines.isEmpty {
             menu.addItem(.separator())
-            addLabel(benchRunning ? "⚡ Testing speed…" : "📊 Speed Test Result", bold: true)
+            addLabel(benchRunning ? "⚡ Testing speed…" : "📊 Speed Test", bold: true)
             for line in proofLines {
                 addLabel("   \(friendlyProofLine(line))")
             }
@@ -303,64 +313,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         if currentStatus != nil {
-            let stopItem = NSMenuItem(title: "■ Turn OFF", action: #selector(stopBonding), keyEquivalent: "s")
+            let stopItem = NSMenuItem(title: "🔴 Turn OFF", action: #selector(stopBonding), keyEquivalent: "s")
             stopItem.target = self
+            stopItem.isEnabled = (busyText == nil)
             menu.addItem(stopItem)
 
             let benchItem = NSMenuItem(
-                title: benchRunning ? "⚡ Testing Speed…" : "⚡ Test Speed (Alone vs Combined)",
+                title: benchRunning ? "⚡ Testing…" : "⚡ Speed Test",
                 action: benchRunning ? nil : #selector(runSpeedProof),
                 keyEquivalent: "b"
             )
             benchItem.target = self
             menu.addItem(benchItem)
         } else {
-            let startItem = NSMenuItem(title: "▶ Turn ON (Auto-Combine All)", action: #selector(startBonding), keyEquivalent: "s")
+            let startItem = NSMenuItem(title: "🟢 Turn ON (Combine All)", action: #selector(startBonding), keyEquivalent: "s")
             startItem.target = self
+            startItem.isEnabled = (busyText == nil)
             menu.addItem(startItem)
         }
 
+        menu.addItem(.separator())
+        let moreRoot = NSMenuItem(title: "🔧 More", action: nil, keyEquivalent: "")
+        let more = NSMenu()
+
         let wifiItem = NSMenuItem(title: "📶 Join Another Wi-Fi…", action: #selector(joinAnotherWiFi), keyEquivalent: "w")
         wifiItem.target = self
-        menu.addItem(wifiItem)
+        more.addItem(wifiItem)
 
-        // Tuck technical controls cleanly into Advanced submenu
-        menu.addItem(.separator())
-        let advRoot = NSMenuItem(title: "Advanced", action: nil, keyEquivalent: "")
-        let adv = NSMenu()
         if let st = currentStatus {
-            let info = NSMenuItem(title: "Tunnel: \(st.tunnel) (\(st.tunnel_ip)) · \(st.server)", action: nil, keyEquivalent: "")
+            more.addItem(.separator())
+            let info = NSMenuItem(title: "🌐 \(st.tunnel) (\(st.tunnel_ip)) · \(st.server)", action: nil, keyEquivalent: "")
             info.isEnabled = false
-            adv.addItem(info)
-            let pkts = NSMenuItem(title: "Packets: \(st.reassembler.delivered) ok · \(st.reassembler.gaps_skipped) gaps", action: nil, keyEquivalent: "")
-            pkts.isEnabled = false
-            adv.addItem(pkts)
-            adv.addItem(.separator())
+            more.addItem(info)
             for link in st.links {
-                let act = link.paused ? "Resume" : "Pause"
-                let item = NSMenuItem(title: "\(act) \(friendlyName(link.name)) (\(link.name))",
+                let act = link.paused ? "▶ Resume" : "⏸ Pause"
+                let item = NSMenuItem(title: "\(act) \(friendlyLabel(link.name))",
                                       action: #selector(toggleLink(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = [link.name, link.paused ? "resume" : "pause"]
-                adv.addItem(item)
+                more.addItem(item)
             }
-            adv.addItem(.separator())
-            let customAdd = NSMenuItem(title: "Add Custom Interface / Bridge…", action: #selector(addLinkDialog), keyEquivalent: "")
-            customAdd.target = self
-            adv.addItem(customAdd)
         }
-        let repairPhone = NSMenuItem(title: "Repair Android USB Driver (rndis-tether)", action: #selector(connectPhone), keyEquivalent: "")
+        more.addItem(.separator())
+        let repairPhone = NSMenuItem(title: "🤖 Repair Android USB", action: #selector(connectPhone), keyEquivalent: "")
         repairPhone.target = self
-        adv.addItem(repairPhone)
+        more.addItem(repairPhone)
 
-        let tuiItem = NSMenuItem(title: "Open Terminal Monitor (bond)", action: #selector(openTUI), keyEquivalent: "")
+        let tuiItem = NSMenuItem(title: "💻 Terminal Monitor (bond)", action: #selector(openTUI), keyEquivalent: "")
         tuiItem.target = self
-        adv.addItem(tuiItem)
+        more.addItem(tuiItem)
 
-        advRoot.submenu = adv
-        menu.addItem(advRoot)
+        moreRoot.submenu = more
+        menu.addItem(moreRoot)
 
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "🚪 Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
     }
@@ -381,45 +387,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func startBonding() {
         busyText = "Starting…"
+        proofLines = []
         lastNote = nil
         render()
         DispatchQueue.global(qos: .userInitiated).async {
-            // Ensure Android USB tether is connected if plugged in
             _ = self.runShell("rndis-tether connect 2>/dev/null || true")
 
             let prep = self.runShell("\(self.baseDir)/start-bond.sh --prepare")
             guard prep.code == 0 else {
                 DispatchQueue.main.async {
                     self.busyText = nil
-                    self.lastNote = "No active internet connections found yet"
+                    self.setNote("No internet connections found")
                     self.render()
                 }
                 return
             }
 
-            // Pause alfa-autoswitch + disable SOCKS5 so all apps use German VPN tunnel
-            let alfaMode = self.runShell("cat /tmp/alfa-mode 2>/dev/null || echo auto").out.trimmingCharacters(in: .whitespacesAndNewlines)
-            if alfaMode != "off" || self.detectSocksProxy() {
-                _ = self.runShell("echo off > /tmp/alfa-mode; networksetup -setsocksfirewallproxystate Wi-Fi off")
-                self.socksDisabledByUs = true
-            }
+            // Clear macOS SOCKS5 proxy while bonded (never touch /tmp/alfa-mode)
+            self.clearMacOSSocksIfEnabled()
 
             let launchCmd = """
             /usr/bin/python3 -c 'import subprocess; subprocess.Popen(["/bin/bash","-c","set -a; source /tmp/speedbond-launch.env; rm -f /tmp/speedbond-launch.env; exec \(self.baseDir)/speedbond client -server \\"$SPEEDBOND_SERVER\\" -links \\"$SPEEDBOND_LINKS\\" -pin \\"$SPEEDBOND_PIN\\""], stdin=subprocess.DEVNULL, stdout=open("/tmp/open-speedify-client.log","wb"), stderr=subprocess.STDOUT, start_new_session=True)'
             """
             let ok = self.runAdminShell(launchCmd)
             if ok.code == 0 {
-                // Reconnect RNDIS after utun opens so Android phone joins immediately
-                Thread.sleep(forTimeInterval: 1.5)
-                _ = self.runShell("rndis-tether disconnect 2>/dev/null || true; sleep 0.5; rndis-tether connect 2>/dev/null || true")
+                // Wait briefly for control API to come up so UI transitions smoothly
+                for _ in 0..<14 {
+                    if self.runShell("curl -sf --max-time 1 \(self.ctrlURL)/status >/dev/null").code == 0 {
+                        break
+                    }
+                    Thread.sleep(forTimeInterval: 0.4)
+                }
+                _ = self.runShell("rndis-tether disconnect 2>/dev/null || true; sleep 0.3; rndis-tether connect 2>/dev/null || true")
             }
             DispatchQueue.main.async {
                 self.busyText = nil
                 if ok.code != 0 {
                     _ = self.runShell("rm -f /tmp/speedbond-launch.env")
-                    self.lastNote = "Cancelled"
-                } else {
-                    self.lastNote = "Bonding started — finding all connections…"
+                    self.setNote("Cancelled")
                 }
                 self.poll()
             }
@@ -431,15 +436,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         render()
         postControl("/stop") { [weak self] _ in
             guard let self = self else { return }
-            if self.socksDisabledByUs {
-                _ = self.runShell("echo auto > /tmp/alfa-mode; networksetup -setsocksfirewallproxystate Wi-Fi on")
-                self.socksDisabledByUs = false
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                self.busyText = nil
-                self.lastNote = "Turned OFF"
-                self.proofLines = []
-                self.poll()
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Wait briefly for speedbond client to release port 19454
+                for _ in 0..<10 {
+                    if self.runShell("nc -z 127.0.0.1 19454 2>/dev/null").code != 0 {
+                        break
+                    }
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+                // Immediately restore Alfa as default if Alfa is ON
+                let mode = self.runShell("cat /tmp/alfa-mode 2>/dev/null || echo on").out.trimmingCharacters(in: .whitespacesAndNewlines)
+                if mode != "off" && FileManager.default.fileExists(atPath: "\(self.alfaDir)/monitor.sock") {
+                    _ = self.runShell("\(self.alfaDir)/alfa.sh proxy on >/dev/null 2>&1 || true")
+                }
+                DispatchQueue.main.async {
+                    self.busyText = nil
+                    self.proofLines = []
+                    self.lastNote = nil
+                    self.poll()
+                }
             }
         }
     }
@@ -447,7 +462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func runSpeedProof() {
         guard !benchRunning else { return }
         benchRunning = true
-        proofLines = ["Measuring each connection alone, then combined (~25s)…"]
+        proofLines = ["Measuring each connection, then combined (~25s)…"]
         render()
         DispatchQueue.global(qos: .userInitiated).async {
             let res = self.runShell("\(self.baseDir)/speedbond bench -seconds 8 -streams 3")
@@ -460,14 +475,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.proofLines = lines.isEmpty ? ["Speed test could not run right now"] : lines
                 self.render()
                 if let summary = lines.first(where: { $0.hasPrefix("PROOF:") }) ?? lines.last {
-                    self.notify("Speed Test Complete", self.friendlyProofLine(summary))
+                    self.notify("⚡ Speed Test Done", self.friendlyProofLine(summary))
                 }
             }
         }
     }
 
-    /// Scans nearby Wi-Fi networks and lets a non-technical user connect either Mac Wi-Fi
-    /// or Alfa Antenna to a 2nd Wi-Fi (asking for password only if needed).
     @objc private func joinAnotherWiFi() {
         busyText = "Scanning Wi-Fi…"
         render()
@@ -485,13 +498,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     ssids.append(name)
                 }
             }
-            // Also include macOS saved preferred Wi-Fi names in case scan was privacy-redacted
             let pref = self.runShell("networksetup -listpreferredwirelessnetworks en0 | tail -n +2")
             for line in pref.out.split(separator: "\n") {
                 let s = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !s.isEmpty && !ssids.contains(s) {
-                    ssids.append(s)
-                }
+                if !s.isEmpty && !ssids.contains(s) { ssids.append(s) }
             }
 
             let hasAlfa = FileManager.default.fileExists(atPath: "\(self.alfaDir)/monitor.sock")
@@ -503,27 +513,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.activate(ignoringOtherApps: true)
 
                 let alert = NSAlert()
-                alert.messageText = "Connect to Another Wi-Fi"
-                alert.informativeText = "Pick a network to combine with your other connections. Leave password blank if already saved."
+                alert.messageText = "📶 Join Another Wi-Fi"
+                alert.informativeText = "Pick a network. Leave password blank if already saved."
 
                 let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: hasAlfa ? 96 : 64))
-
                 let netCombo = NSComboBox(frame: NSRect(x: 0, y: hasAlfa ? 66 : 34, width: 320, height: 26))
                 netCombo.isEditable = true
                 netCombo.addItems(withObjectValues: ssids)
                 if let first = ssids.first { netCombo.stringValue = first }
-                netCombo.placeholderString = "Wi-Fi name (e.g. Infinix HOT 60i)"
+                netCombo.placeholderString = "Wi-Fi name"
                 container.addSubview(netCombo)
 
                 let passField = NSSecureTextField(frame: NSRect(x: 0, y: hasAlfa ? 34 : 2, width: 320, height: 24))
-                passField.placeholderString = "Wi-Fi password (blank if already saved)"
+                passField.placeholderString = "Password (blank if saved)"
                 container.addSubview(passField)
 
                 let targetPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 26))
                 if hasAlfa {
                     targetPopup.addItems(withTitles: [
-                        "Use Mac Wi-Fi (keeps Alfa on its current Wi-Fi)",
-                        "Use Alfa Antenna (keeps Mac Wi-Fi on its current Wi-Fi)"
+                        "📶 Mac Wi-Fi",
+                        "📡 Alfa Antenna"
                     ])
                     container.addSubview(targetPopup)
                 }
@@ -545,7 +554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if useAlfa {
                         res = self.runExec("/bin/bash", ["\(self.alfaDir)/alfa.sh", "wifi", ssid, pass])
                         if res.code == 0 {
-                            _ = self.runShell("\(self.baseDir)/start-bond.sh --prepare 'alfa=127.0.0.1:4546'")
+                            _ = self.runShell("\(self.baseDir)/start-bond.sh --setup-alfa --force")
                             self.postControlSync("/links/add?spec=alfa=127.0.0.1:4546")
                         }
                     } else {
@@ -558,9 +567,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     DispatchQueue.main.async {
                         self.busyText = nil
-                        self.lastNote = res.code == 0
-                            ? "Joined \(ssid) on \(useAlfa ? "Alfa Antenna" : "Mac Wi-Fi")!"
-                            : "Could not join \(ssid) — check password"
+                        self.setNote(res.code == 0
+                            ? "Joined \(ssid) on \(useAlfa ? "📡 Alfa" : "📶 Mac Wi-Fi")"
+                            : "Could not join \(ssid)")
                         self.poll()
                     }
                 }
@@ -568,45 +577,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Advanced Actions
+    // MARK: - More Actions
 
     @objc private func toggleLink(_ sender: NSMenuItem) {
         guard let pair = sender.representedObject as? [String], pair.count == 2 else { return }
         let name = pair[0].addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? pair[0]
         let action = pair[1]
-        postControl("/links/\(action)?name=\(name)") { [weak self] err in
-            DispatchQueue.main.async {
-                self?.lastNote = err ?? "\(action.capitalized)d \(self?.friendlyName(pair[0]) ?? pair[0])"
-                self?.poll()
-            }
-        }
-    }
-
-    @objc private func addLinkDialog() {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Add Custom Link"
-        alert.informativeText = "Interface name (e.g. feth50, en5, en0) or bridge (alfa=127.0.0.1:4546):"
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        input.stringValue = "feth50"
-        alert.accessoryView = input
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn {
-            let spec = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !spec.isEmpty else { return }
-            let q = spec.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? spec
-            postControl("/links/add?spec=\(q)") { [weak self] err in
-                DispatchQueue.main.async {
-                    self?.lastNote = err ?? "Added \(spec)"
-                    self?.poll()
-                }
-            }
+        postControl("/links/\(action)?name=\(name)") { [weak self] _ in
+            DispatchQueue.main.async { self?.poll() }
         }
     }
 
     @objc private func connectPhone() {
-        busyText = "Repairing Phone…"
+        busyText = "Repairing Android…"
         render()
         DispatchQueue.global(qos: .userInitiated).async {
             let cmd = "/opt/homebrew/bin/rndis-tether install && /opt/homebrew/bin/rndis-tether config prefer-phone no && /opt/homebrew/bin/rndis-tether config tx-batch 1 && /opt/homebrew/bin/rndis-tether connect"
@@ -617,9 +600,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async {
                 self.busyText = nil
-                self.lastNote = res.code == 0
-                    ? "Android USB ready — will combine automatically"
-                    : "Turn on USB Tethering on your Android phone first"
+                self.setNote(res.code == 0 ? "🤖 Android USB ready" : "Enable USB Tethering on Android first")
                 self.poll()
             }
         }
@@ -634,6 +615,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Helpers
+
+    private func clearMacOSSocksIfEnabled() {
+        let check = runShell("scutil --proxy | grep -q 'SOCKSEnable : 1'")
+        if check.code == 0 {
+            _ = runShell("""
+            networksetup -listnetworkserviceorder 2>/dev/null | awk '
+              /^\\([0-9]+\\) / { name=$0; sub(/^\\([0-9]+\\) /, "", name); next }
+              /\\(Hardware Port:.*Device: en[0-9]+\\)/ && name != "" { print name; name="" }
+            ' | while IFS= read -r svc; do
+              networksetup -setsocksfirewallproxystate "$svc" off 2>/dev/null || true
+            done
+            """)
+        }
+    }
 
     private func postControl(_ path: String, done: @escaping (String?) -> Void) {
         guard let url = URL(string: ctrlURL + path) else { done("bad url"); return }
@@ -654,11 +649,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let sem = DispatchSemaphore(value: 0)
         postControl(path) { _ in sem.signal() }
         _ = sem.wait(timeout: .now() + 3.0)
-    }
-
-    private func detectSocksProxy() -> Bool {
-        let res = runShell("networksetup -getsocksfirewallproxy Wi-Fi")
-        return res.code == 0 && res.out.contains("Enabled: Yes")
     }
 
     private func notify(_ title: String, _ body: String) {

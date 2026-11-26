@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here. Dates use ISO format.
 
+## [0.4.0] - 2026-11-26
+
+### Fixed
+
+- **Alfa bridge SSH authentication failure (`start-bond.sh`):** Added `-o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no` to `ssh` and `scp` so `ssh-agent`/smartcard keys never cause `Too many authentication failures`, and verified SSH reachability before running any Wi-Fi/USB recovery.
+- **Post-sleep / relay-restart tunnel IP blackhole (`client.go`, `tun_darwin.go`, `tun_linux.go`):** When a session expires during Mac sleep (>2 min) and the relay assigns a new `10.77.x.y` tunnel IP on reconnect, the client now detects the IP change via `syncTunnelIP` and updates `utun`/routes live instead of sending packets with the stale IP (`recv=0`).
+- **Stopped breaking Alfa mode (`SpeedbondBar.swift`, `start-bond.sh`):** Open Speedify no longer overwrites `/tmp/alfa-mode` with `off`. It clears macOS system SOCKS5 across physical services while bonded and immediately restores Alfa proxy on Turn OFF if Alfa is ON.
+
+### Changed
+
+- **Ultra-simplified emoji menu bar (`SpeedbondBar.swift`, `build-speedbondbar.sh`):** Compact `⚪ 🚀` / `🟡 🚀 1x` / `🟢 🚀 3x` status bar with single `🟢 Turn ON (Combine All)` / `🔴 Turn OFF` toggle, emoji link list (`📡 Alfa`, `📶 Mac Wi-Fi`, `📱 iPhone`, `🤖 Android`, `🔌 Ethernet`), collapsed `🔧 More ▸` submenu, and login LaunchAgent (`com.speedbondbar.plist`).
+- **Faster idempotent Alfa auto-join & stale link pruning:** Added `start-bond.sh --setup-alfa [--force]` (no Keychain prompt or launch-env clobber), auto-joins Alfa within seconds when plugged in & running, and auto-prunes unplugged USB interfaces.
+
+### Verified
+
+- `go test -count=1 -race ./...` passes (including new `TestClientSyncTunnelIP`).
+- Live 3-link QUIC probe (`speedbond probe`): `alfa=127.0.0.1:4546` (`220ms`), `en0` Mac Wi-Fi (`182ms`), and `en9` iPhone USB (`219ms`) all `OK` on the same relay session (`10.77.0.48`), auto-discovered by `./start-bond.sh --prepare`.
+
 ## [0.3.0] - 2026-11-23
 
 ### Added
